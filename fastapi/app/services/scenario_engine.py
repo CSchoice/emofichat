@@ -1,37 +1,48 @@
-"""
-간단한 룰 기반 시나리오 감지 예시
-row(dict) + 사용자 발화 → (label, prob, 중요지표) 반환
-"""
-
-import re, math
-from typing import Tuple, Dict, Any
-
-# 키워드·임계값 예시
-_LOWCASH_RE = re.compile(r"(카드값|결제|돈이 없어|잔액|💸)")
-_STRESS_RE  = re.compile(r"(빚|연체|대출|한도|이자|한계)")
+import math
+from typing import Dict, Tuple, Any
+from rules.scenario_rules import scenario_rules
+from rules.thresholds import thresholds
+from app.util.eval_expr import eval_expr
 
 def _sigmoid(x: float) -> float:
     return 1 / (1 + math.exp(-x))
 
-def score_scenarios(row: Dict[str, Any], user_msg: str) -> Tuple[str, float, Dict[str, float]]:
+def score_scenarios(row: Dict[str, Any], user_msg: str = "") -> Tuple[str, float, Dict[str, float]]:
     """
-    row = FinanceMetric dict, user_msg = 사용자 채팅
+    row(dict): 고객 1명의 금융 지표 및 분석값
+    user_msg(str): 사용자의 발화 텍스트 (선택)
+
+    return: (시나리오 라벨, 확률(0~1), 주요 관련 지표)
     """
-    liq   = row.get("liquidity", 0)
-    stress= row.get("stress", 0)
-    debt  = row.get("debt_ratio", 0)
+    best_scenario = "neutral"
+    best_score = 0.0
+    best_factors = {}
 
-    # -------- Gate + Weight 샘플 -------- #
-    if liq < 30 or _LOWCASH_RE.search(user_msg):
-        prob = _sigmoid((30 - liq) / 10)            # 0~1
-        return "low_cash", prob, {"liquidity": liq}
+    for scenario, rule in scenario_rules.items():
+        # 1. gate 조건 확인
+        if not all(eval_expr(g["expr"], row, thresholds) for g in rule.get("gate", [])):
+            continue
 
-    if stress > 70 or _STRESS_RE.search(user_msg):
-        prob = _sigmoid((stress - 70) / 10)
-        return "debt_crisis", prob, {"stress": stress}
+        # 2. signal 점수 합산
+        total_weight = sum(s["weight"] for s in rule["signals"])
+        signal_score = 0
+        signal_factors = {}
+        for s in rule["signals"]:
+            if eval_expr(s["expr"], row, thresholds):
+                signal_score += s["weight"]
+                signal_factors[s["expr"]] = row.get(s["expr"].split()[0], None)
 
-    if debt > 80:
-        prob = _sigmoid((debt - 80) / 10)
-        return "credit_down", prob, {"debt_ratio": debt}
+        # 3. modifier 적용
+        for m in rule.get("modifiers", []):
+            if eval_expr(m["expr"], row, thresholds):
+                signal_score += m.get("delta", 0)
 
-    return "no_issue", 0.0, {}
+        # 4. 정규화된 확률 계산
+        prob = _sigmoid(signal_score / (total_weight + 1e-5))
+
+        if signal_score >= rule["threshold"] and prob > best_score:
+            best_score = prob
+            best_scenario = rule["label"]
+            best_factors = signal_factors
+
+    return best_scenario, round(best_score, 3), best_factors
