@@ -13,7 +13,7 @@ from app.core.openai_client import client as openai_client
 from app.core.db import SessionMaker
 from app.models.finance import User, CardUsage, Delinquency, BalanceInfo, SpendingPattern, ScenarioLabel
 from app.services.scenario_engine import score_scenarios
-from app.services.advice_templates import TEMPLATES
+# 템플릿 대신 GPT 직접 활용하므로 TEMPLATES 임포트 제거
 from app.services.generic_chat import load_history, save_history
 
 # 로거 설정
@@ -202,18 +202,40 @@ async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[
 
         # ── 시나리오 판단 ───────────────────────────────────────── #
         label, prob, metrics = score_scenarios(row, user_msg)
-        # 시나리오가 존재하지 않으면 no_issue 기본값 사용
-        advice = TEMPLATES.get(label, TEMPLATES.get("no_issue", "도와드릴 점이 없습니다."))
-
-        # ── GPT 다듬기 ─────────────────────────────────────────── #
+        
+        # ── 사용자 재무 데이터 요약 ───────────────────────────────── #
+        # 중요 지표만 선별하여 GPT에 전달
+        user_finance_summary = {
+            "재무상태": label,  # 시나리오 라벨
+            "나이": row.get("age", "정보없음"),
+            "성별": row.get("gender", "정보없음"),
+            "소득수준": row.get("income_level", "정보없음"),
+            "직업": row.get("job_type", "정보없음"),
+            "현재잔액": row.get("balance_b0m", 0),
+            "3개월평균잔액": row.get("avg_balance_3m", 0),
+            "최근카드사용액": row.get("card_usage_b0m", 0),
+            "3개월평균카드사용액": row.get("avg_card_usage_3m", 0),
+            "연체여부": row.get("is_delinquent", 0) == 1,
+            "유동성점수": row.get("liquidity_score", 50.0),
+        }
+        
+        # ── GPT로 직접 맞춤형 조언 생성 ────────────────────────── #
         sys_prompt = (
-            "너는 재무 상담 챗봇이야. 답변은 친근한 한국어 2~3문장, "
-            "숫자는 % 대신 '퍼센트' 표기, 어려운 금융 용어는 풀어서 설명해."
+            "너는 전문 재무 상담 챗봇이야. 사용자의 재무 데이터와 질문을 분석해서 구체적이고 실용적인 조언을 제공해야 해. "
+            "답변은 친근한 한국어로 2~3문장, 숫자는 % 대신 '퍼센트' 표기, 어려운 금융 용어는 풀어서 설명해. "
+            "사용자 재무 데이터에 기반한 정확하고 개인화된 조언을 제공해주세요."
         )
+        
+        # 사용자 재무 데이터와 질문을 함께 전달하여 맞춤형 조언 요청
+        user_content = f"""[사용자 재무 데이터]
+{user_finance_summary}
+
+[사용자 질문]
+{user_msg}"""
+        
         messages = [
             {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": f"[사용자]\n{user_msg}"},
-            {"role": "assistant", "content": advice},           # 초안
+            {"role": "user", "content": user_content}
         ]
 
         try:
@@ -227,11 +249,13 @@ async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[
         except BadRequestError as e:
             # 프롬프트 오류 시 템플릿 그대로 사용
             logger.error(f"OpenAI API 오류: {str(e)}")
-            reply = advice
+            # 기본 응답 제공
+            reply = f"재무 상태 '{label}'에 맞는 조언을 드리려 했으나 연결 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
         except Exception as e:
             # 기타 오류 시에도 템플릿 그대로 사용
             logger.error(f"OpenAI API 호출 오류: {str(e)}")
-            reply = advice
+            # 기본 응답 제공
+            reply = f"재무 상태 '{label}'에 맞는 조언을 드리려 했으나 처리 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
 
         # ── 결과 패키징 ─────────────────────────────────────────── #
         scenario_info = (
