@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os, backoff, polars as pl
+import backoff
 from typing import Dict, Any, Tuple, Optional
 import logging
 
@@ -10,8 +10,8 @@ from openai import (
 from sqlalchemy import select
 
 from app.core.openai_client import client as openai_client
-from app.core.db import SessionMaker                         # ➜ async SQLAlchemy 세션
-from app.models.finance import FinanceMetric                 # ➜ ORM 모델
+from app.core.db import SessionMaker
+from app.models.finance import User, CardUsage, Delinquency, BalanceInfo, SpendingPattern, ScenarioLabel
 from app.services.scenario_engine import score_scenarios
 from app.services.advice_templates import TEMPLATES
 from app.services.generic_chat import load_history, save_history
@@ -19,57 +19,90 @@ from app.services.generic_chat import load_history, save_history
 # 로거 설정
 logger = logging.getLogger(__name__)
 
-# ───────────────────────── 공통 설정 ────────────────────────── #
+# ───────────────────── 공통 설정 ────────────────────── #
 RETRY_ERRORS = (APITimeoutError, APIConnectionError, RateLimitError)
 
-# ──────────────────────── CSV 폴백 캐시 ─────────────────────── #
-_CSV_PATH = os.getenv("FINANCE_CSV", "data/고객통합_복합시나리오라벨링_ver2샘플.csv")
-if os.path.exists(_CSV_PATH):
-    _FIN_DF = (
-        pl.read_csv(_CSV_PATH)
-          .with_columns(pl.col("user_id").cast(pl.Utf8))
-    )
-    _FIN_CACHE: Dict[str, dict[str, Any]] = {
-        r["user_id"]: r for r in _FIN_DF.to_dicts()
-    }
-else:
-    _FIN_CACHE = {}
-
-# ──────────────────────── DB 조회 함수 ──────────────────────── #
+# ──────────────────── DB 조회 함수 ──────────────────── #
 async def _get_user_metrics(user_id: str) -> dict[str, Any] | None:
-    """MySQL → dict (없으면 None)"""
+    """여러 테이블에서 사용자 데이터 조회 → 통합 dict"""
     try:
         async with SessionMaker() as sess:
-            row = (
-                await sess.execute(
-                    select(FinanceMetric).where(FinanceMetric.user_id == user_id)
-                )
-            ).scalar_one_or_none()
-
-        if not row:
-            return None
-
-        # SQLAlchemy object → clean dict
-        return {k: v for k, v in row.__dict__.items() if not k.startswith("_")}
+            # 사용자 정보 조회
+            user_query = select(User).where(User.user_id == user_id)
+            user_row = (await sess.execute(user_query)).scalar_one_or_none()
+            
+            if not user_row:
+                return None
+                
+            # 가장 최근 날짜의 데이터 조회를 위한 서브쿼리
+            card_query = select(CardUsage).where(
+                CardUsage.user_id == user_id
+            ).order_by(CardUsage.record_date.desc()).limit(1)
+            
+            delinquency_query = select(Delinquency).where(
+                Delinquency.user_id == user_id
+            ).order_by(Delinquency.record_date.desc()).limit(1)
+            
+            balance_query = select(BalanceInfo).where(
+                BalanceInfo.user_id == user_id
+            ).order_by(BalanceInfo.record_date.desc()).limit(1)
+            
+            spending_query = select(SpendingPattern).where(
+                SpendingPattern.user_id == user_id
+            ).order_by(SpendingPattern.record_date.desc()).limit(1)
+            
+            scenario_query = select(ScenarioLabel).where(
+                ScenarioLabel.user_id == user_id
+            ).order_by(ScenarioLabel.record_date.desc()).limit(1)
+            
+            # 각 테이블에서 최근 데이터 조회
+            card_row = (await sess.execute(card_query)).scalar_one_or_none()
+            delinquency_row = (await sess.execute(delinquency_query)).scalar_one_or_none()
+            balance_row = (await sess.execute(balance_query)).scalar_one_or_none()
+            spending_row = (await sess.execute(spending_query)).scalar_one_or_none()
+            scenario_row = (await sess.execute(scenario_query)).scalar_one_or_none()
+            
+            # 모든 데이터가 없는 경우
+            if not card_row or not delinquency_row or not balance_row or not spending_row or not scenario_row:
+                logger.warning(f"사용자 {user_id}의 일부 테이블 데이터가 없습니다.")
+                # 부분 데이터가 있는 경우 처리 가능하도록 할 수도 있음
+                return None
+            
+            # 통합 딕셔너리 생성
+            result = {}
+            
+            # User 테이블 데이터 추가
+            for key, value in user_row.__dict__.items():
+                if not key.startswith('_'):
+                    result[key] = value
+                    
+            # 다른 테이블의 데이터 추가
+            for row in [card_row, delinquency_row, balance_row, spending_row, scenario_row]:
+                for key, value in row.__dict__.items():
+                    if not key.startswith('_') and key != 'user_id' and key != 'record_date':
+                        result[key] = value
+            
+            return result
+            
     except Exception as e:
         # 테이블 없거나 DB 오류 발생 시 로그만 출력하고 None 반환
-        if "Table 'emofinance.finance_metric' doesn't exist" in str(e):
-            logger.warning(f"finance_metric 테이블이 없습니다. CSV 캐시로 폴백됩니다.")
+        if "Table 'emofinance." in str(e):
+            logger.warning(f"테이블이 없습니다: {str(e)}. 데이터베이스 확인 필요.")
         else:
             logger.error(f"DB 조회 오류: {str(e)}")
         return None
 
-# ───────────────────────── 메인 엔드포인트 로직 ───────────────────────── #
+# ───────────────────── 메인 엔드포인트 로직 ───────────────────── #
 @backoff.on_exception(backoff.expo, RETRY_ERRORS, max_tries=3)
 async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[Dict]]:
     """
-    1️⃣ 사용자 지표(DB → CSV 캐시 순)  
+    1️⃣ 사용자 지표(DB에서 조회)  
     2️⃣ 시나리오 스코어링 + 템플릿 조언  
     3️⃣ GPT-3.5로 톤·길이 다듬기
     """
     try:
         # 사용자 지표 조회
-        row = await _get_user_metrics(user_id) or _FIN_CACHE.get(user_id)
+        row = await _get_user_metrics(user_id)
         if not row:
             # 지표가 없는 신규/테스트 계정 → 일반 채팅으로 폴백
             logger.warning(f"사용자 {user_id} 지표 없음. 일반 채팅으로 응답")
