@@ -2,7 +2,7 @@
 from fastapi import FastAPI, Request, status, Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1 import chat            # ← 폴더 구조에 맞춰 변경!
+from app.api.v1 import chat
 from dotenv import load_dotenv, find_dotenv
 import logging
 import time
@@ -28,7 +28,7 @@ app = FastAPI(
 # CORS 미들웨어 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 실제 운영 환경에서는 특정 도메인만 허용하는 것이 좋습니다
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

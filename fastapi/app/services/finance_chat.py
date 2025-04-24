@@ -24,64 +24,116 @@ RETRY_ERRORS = (APITimeoutError, APIConnectionError, RateLimitError)
 
 # ──────────────────── DB 조회 함수 ──────────────────── #
 async def _get_user_metrics(user_id: str) -> dict[str, Any] | None:
-    """여러 테이블에서 사용자 데이터 조회 → 통합 dict"""
+    """여러 테이블에서 사용자 데이터 조회 → 통합 dict
+    
+    부분 데이터 처리: 기본 필수 데이터가 있으면 최대한 정보를 제공합니다.
+    """
     try:
         async with SessionMaker() as sess:
-            # 사용자 정보 조회
+            # 사용자 정보 조회 (필수)
             user_query = select(User).where(User.user_id == user_id)
             user_row = (await sess.execute(user_query)).scalar_one_or_none()
             
             if not user_row:
+                logger.warning(f"사용자 {user_id} 기본 정보가 없습니다.")
                 return None
                 
-            # 가장 최근 날짜의 데이터 조회를 위한 서브쿼리
-            card_query = select(CardUsage).where(
-                CardUsage.user_id == user_id
-            ).order_by(CardUsage.record_date.desc()).limit(1)
+            # 각 테이블에서 최근 데이터 조회를 위한 서브쿼리 정의
+            # 데이터가 없더라도 오류를 발생시키지 않음
+            queries = {
+                "card": select(CardUsage).where(
+                    CardUsage.user_id == user_id
+                ).order_by(CardUsage.record_date.desc()).limit(1),
+                
+                "delinquency": select(Delinquency).where(
+                    Delinquency.user_id == user_id
+                ).order_by(Delinquency.record_date.desc()).limit(1),
+                
+                "balance": select(BalanceInfo).where(
+                    BalanceInfo.user_id == user_id
+                ).order_by(BalanceInfo.record_date.desc()).limit(1),
+                
+                "spending": select(SpendingPattern).where(
+                    SpendingPattern.user_id == user_id
+                ).order_by(SpendingPattern.record_date.desc()).limit(1),
+                
+                "scenario": select(ScenarioLabel).where(
+                    ScenarioLabel.user_id == user_id
+                ).order_by(ScenarioLabel.record_date.desc()).limit(1)
+            }
             
-            delinquency_query = select(Delinquency).where(
-                Delinquency.user_id == user_id
-            ).order_by(Delinquency.record_date.desc()).limit(1)
-            
-            balance_query = select(BalanceInfo).where(
-                BalanceInfo.user_id == user_id
-            ).order_by(BalanceInfo.record_date.desc()).limit(1)
-            
-            spending_query = select(SpendingPattern).where(
-                SpendingPattern.user_id == user_id
-            ).order_by(SpendingPattern.record_date.desc()).limit(1)
-            
-            scenario_query = select(ScenarioLabel).where(
-                ScenarioLabel.user_id == user_id
-            ).order_by(ScenarioLabel.record_date.desc()).limit(1)
-            
-            # 각 테이블에서 최근 데이터 조회
-            card_row = (await sess.execute(card_query)).scalar_one_or_none()
-            delinquency_row = (await sess.execute(delinquency_query)).scalar_one_or_none()
-            balance_row = (await sess.execute(balance_query)).scalar_one_or_none()
-            spending_row = (await sess.execute(spending_query)).scalar_one_or_none()
-            scenario_row = (await sess.execute(scenario_query)).scalar_one_or_none()
-            
-            # 모든 데이터가 없는 경우
-            if not card_row or not delinquency_row or not balance_row or not spending_row or not scenario_row:
-                logger.warning(f"사용자 {user_id}의 일부 테이블 데이터가 없습니다.")
-                # 부분 데이터가 있는 경우 처리 가능하도록 할 수도 있음
-                return None
-            
-            # 통합 딕셔너리 생성
+            # 통합 딕셔너리 생성 - 기본값은 사용자 데이터
             result = {}
-            
-            # User 테이블 데이터 추가
             for key, value in user_row.__dict__.items():
                 if not key.startswith('_'):
                     result[key] = value
+            
+            # 각 테이블 데이터 조회 및 설정
+            # 각 테이블의 중요도에 따라 필수/선택 지정
+            has_critical_data = True
+            missing_tables = []
+            
+            # 1. 필수 테이블
+            critical_tables = ["card", "balance"]  # 가장 중요한 테이블
+            
+            for table_name in critical_tables:
+                query = queries[table_name]
+                row = (await sess.execute(query)).scalar_one_or_none()
+                
+                if not row:
+                    has_critical_data = False
+                    missing_tables.append(table_name)
+                    continue
                     
-            # 다른 테이블의 데이터 추가
-            for row in [card_row, delinquency_row, balance_row, spending_row, scenario_row]:
+                # 데이터 있는 경우 추가
                 for key, value in row.__dict__.items():
                     if not key.startswith('_') and key != 'user_id' and key != 'record_date':
                         result[key] = value
             
+            # 필수 데이터가 없으면 남은 테이블은 처리하지 않음
+            if not has_critical_data:
+                logger.warning(f"사용자 {user_id}의 필수 테이블 데이터 없음: {', '.join(missing_tables)}")
+                return None
+            
+            # 2. 선택적 테이블 - 있으면 사용, 없어도 기본 기능 사용 가능
+            optional_tables = ["delinquency", "spending", "scenario"]
+            
+            for table_name in optional_tables:
+                query = queries[table_name]
+                row = (await sess.execute(query)).scalar_one_or_none()
+                
+                if not row:
+                    logger.info(f"사용자 {user_id}의 {table_name} 데이터 없음, 기본값 사용")
+                    # 테이블별 기본값 설정
+                    if table_name == "delinquency":
+                        result["is_delinquent"] = 0
+                        result["delinquent_balance_b0m"] = 0.0
+                        result["recent_delinquent_days"] = 0
+                    elif table_name == "spending":
+                        result["spending_shopping"] = 0.0
+                        result["spending_food"] = 0.0
+                        result["card_application_count"] = 0
+                    elif table_name == "scenario":
+                        result["scenario_labels"] = "no_issue"
+                    continue
+                
+                # 데이터 있는 경우 추가
+                for key, value in row.__dict__.items():
+                    if not key.startswith('_') and key != 'user_id' and key != 'record_date':
+                        result[key] = value
+            
+            # 3. 계산된 필드 추가 (scenario_engine에서 필요한 가상 필드)
+            # 예시: 메타데이터 필드 등을 추가할 수 있음
+            result["revolving_count_3m"] = 0  # 기본값
+            result["stress_index"] = 50.0  # 기본값
+            
+            # 분석에 필요한 추가 계산 필드 처리
+            if "balance_b0m" in result and "avg_balance_3m" in result:
+                balance_ratio = result["balance_b0m"] / (result["avg_balance_3m"] + 0.001)
+                result["liquidity_score"] = min(100, max(0, 100 - (balance_ratio * 20)))
+            else:
+                result["liquidity_score"] = 50.0  # 기본값
+                
             return result
             
     except Exception as e:
