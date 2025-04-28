@@ -21,6 +21,7 @@ from app.services.generic_chat import load_history, save_history
 from app.services.generic_chat import get_generic_reply
 from app.services.finance_analyzer import analyze_financial_trends
 from app.services.data_fetcher import get_user_metrics
+from app.services.product_recommender import recommend_products, format_product_recommendation, PRODUCT_TYPE_DEPOSIT, PRODUCT_TYPE_FUND
 
 # 로거 설정
 logger = logging.getLogger(__name__)
@@ -124,6 +125,7 @@ async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[
     2️⃣ 시나리오 스코어링 + 재무 트렌드 분석
     3️⃣ 이전 대화 히스토리 고려
     4️⃣ GPT-3.5로 맞춤형 조언 생성
+    5️⃣ 필요 시 금융 상품 추천
     """
     try:
         # 사용자 지표 조회
@@ -176,6 +178,34 @@ async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[
         # 사용자 재무 데이터와 감정 분석 결과에 기반하여 성향, 태도, 습관 추론
         user_profile = infer_user_profile(row, finance_trends, conversation_history, user_msg, emotion_data)
         
+        # ── 상품 추천 필요 여부 확인 ────────────────────────────── #
+        needs_product_recommendation = False
+        product_type = None
+        
+        # 대화 내용에서 상품 관련 키워드 확인
+        product_keywords = {
+            "예금": PRODUCT_TYPE_DEPOSIT,
+            "적금": PRODUCT_TYPE_DEPOSIT,
+            "정기예금": PRODUCT_TYPE_DEPOSIT,
+            "입출금": PRODUCT_TYPE_DEPOSIT,
+            "이자율": PRODUCT_TYPE_DEPOSIT,
+            "금리": PRODUCT_TYPE_DEPOSIT,
+            "펀드": PRODUCT_TYPE_FUND,
+            "투자": PRODUCT_TYPE_FUND,
+            "수익률": PRODUCT_TYPE_FUND,
+            "주식형": PRODUCT_TYPE_FUND,
+            "채권형": PRODUCT_TYPE_FUND,
+            "상품": None,  # 일반적인 상품 언급
+            "추천": None,  # 추천 요청
+        }
+        
+        for keyword, ptype in product_keywords.items():
+            if keyword in user_msg:
+                needs_product_recommendation = True
+                if ptype:  # 특정 상품 타입이 있는 경우
+                    product_type = ptype
+                break
+        
         # ── GPT로 맞춤형 조언 생성을 위한 프롬프트 구성 ────────────────── #
         sys_prompt = build_finance_chat_prompt(row, finance_trends, user_profile, label)
         
@@ -200,7 +230,7 @@ async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[
             resp = await openai_client.chat.completions.create(
                 model="gpt-3.5-turbo-0125",
                 temperature=0.5,
-                max_tokens=180,
+                max_tokens=800,
                 messages=messages,
             )
             reply = resp.choices[0].message.content.strip()
@@ -212,6 +242,31 @@ async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[
             # 기타 오류 시에도 기본 응답 제공
             logger.error(f"OpenAI API 호출 오류: {str(e)}")
             reply = f"재무 상태 '{label}'에 맞는 조언을 드리려 했으나 처리 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+
+        # 상품 추천이 필요한 경우 상품 추천 정보 추가
+        if needs_product_recommendation:
+            try:
+                products = await recommend_products(
+                    user_id, 
+                    user_finance_summary, 
+                    emotion_data,
+                    product_type,
+                    limit=3
+                )
+                
+                if products:
+                    # 상품 추천 결과가 있으면 원래 응답에 추가
+                    recommendation_type = product_type if product_type else (
+                        PRODUCT_TYPE_DEPOSIT if "적금" in user_msg or "예금" in user_msg else PRODUCT_TYPE_FUND
+                    )
+                    product_reply = format_product_recommendation(products, recommendation_type, emotion_data)
+                    
+                    # 원래 응답과 상품 추천 합치기
+                    combined_reply = f"{reply}\n\n{product_reply}"
+                    reply = combined_reply
+            except Exception as e:
+                logger.error(f"상품 추천 처리 중 오류 발생: {str(e)}")
+                # 상품 추천 실패 시에도 기본 응답은 제공
 
         # ── 결과 패키징 ─────────────────────────────────────────── #
         scenario_info = (
@@ -288,22 +343,6 @@ def infer_user_profile(row: Dict, finance_trends: Dict, conversation_history: st
         profile["금융단계"] = "은퇴준비기"
         
     # 스트레스 반응 추론 (감정 분석 결과 활용)
-    if emotion_data and emotion_data.get("is_anxious", False):
-        profile["스트레스 반응"] = "감정적 불안감이 높은 상태"
-    elif emotion_data and emotion_data.get("dominant_emotion") == "화남":
-        profile["스트레스 반응"] = "금융 문제에 대한 분노감 표출"
-    elif emotion_data and emotion_data.get("dominant_emotion") == "슬픔":
-        profile["스트레스 반응"] = "금융 문제에 대한 좌절감 표출"
-    elif "조언" in user_msg or "도움" in user_msg or "어떻게" in user_msg:
-        profile["스트레스 반응"] = "지출 조절보다는 외부 상담을 선호함"
-    elif row.get("stress_index", 50) > 70:
-        profile["스트레스 반응"] = "금융 스트레스가 높은 상태"
-    elif row.get("self_adjustment_history", 0) > 3:
-        profile["스트레스 반응"] = "자가 조절형"
-    else:
-        profile["스트레스 반응"] = "스스로 해결하려는 성향"
-        
-    # 감정 상태 추가
     if emotion_data:
         # 기본 감정 매핑 정의
         emotion_mapping = {
@@ -329,6 +368,8 @@ def infer_user_profile(row: Dict, finance_trends: Dict, conversation_history: st
             profile["스트레스 반응"] = "금융에 대한 불안증 높음"
         elif emotion_data.get("is_anxious", False):
             profile["스트레스 반응"] = "감정적 불안감이 높은 상태"
+        else:
+            profile["스트레스 반응"] = "스스로 해결하려는 성향"
         
         # 감정 상태 추가
         profile["감정 상태"] = dominant_emotion

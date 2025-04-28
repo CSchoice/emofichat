@@ -19,10 +19,15 @@ class EmotionResult(BaseModel):
     is_anxious: bool
     all_emotions: Dict[str, float]
 
+class ProductRecommendation(BaseModel):
+    product_type: str  # "deposit" 또는 "fund"
+    products: List[Dict]  # 추천 상품 목록
+
 class ChatResponse(BaseModel):
     reply: str
     scenario: Optional[ScenarioResult] = None
     emotion: Optional[EmotionResult] = None
+    product_recommendation: Optional[ProductRecommendation] = None
 
 # 감정 트렌드 분석 결과 모델
 class EmotionTrendsResponse(BaseModel):

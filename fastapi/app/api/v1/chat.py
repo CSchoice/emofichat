@@ -1,12 +1,14 @@
 from fastapi import APIRouter, HTTPException, Depends, status, Request, BackgroundTasks
-from app.models import ChatRequest, ChatResponse, EmotionResult
+from app.models import ChatRequest, ChatResponse, EmotionResult, ProductRecommendation, ScenarioResult
 from app.services.topic_detector import is_finance_topic, analyze_emotion, analyze_message
 from app.services.emotion_tracker import record_emotion
 from app.services.generic_chat import get_generic_reply
 from app.services.finance_chat import get_finance_reply
+from app.services.product_recommender import PRODUCT_TYPE_DEPOSIT, PRODUCT_TYPE_FUND
 import logging
-from typing import Optional
+from typing import Optional, Dict, List, Any
 import time
+import re
 
 # 로거 설정
 logger = logging.getLogger(__name__)
@@ -42,12 +44,81 @@ async def log_chat(req: ChatRequest, response: ChatResponse, is_finance: bool, e
         f"msg_len={len(req.message)}, reply_len={len(response.reply)}"
     )
 
+def extract_product_recommendation(reply: str) -> tuple[str, Optional[ProductRecommendation]]:
+    """
+    응답 텍스트에서 상품 추천 정보를 추출하고 텍스트와 구조화된 데이터로 분리합니다.
+    
+    Args:
+        reply: 원본 응답 텍스트
+        
+    Returns:
+        (기본 응답 텍스트, 추출된 상품 추천 정보)
+    """
+    # 상품 추천 섹션 판별 패턴
+    recommendation_pattern = r'📌\s*\*\*(예금/적금|펀드)\s*상품\s*추천\*\*\s*\n\n(.*?)(?=해당\s*상품에\s*관심이|$)'
+    
+    # 상품 추천 섹션 검색
+    match = re.search(recommendation_pattern, reply, re.DOTALL)
+    if not match:
+        return reply, None
+    
+    # 상품 추천 섹션 추출
+    product_type_text = match.group(1)
+    product_section = match.group(0)
+    
+    # 상품 유형 결정
+    product_type = PRODUCT_TYPE_DEPOSIT if "예금" in product_type_text or "적금" in product_type_text else PRODUCT_TYPE_FUND
+    
+    # 원본 응답에서 상품 추천 섹션 제거
+    clean_reply = reply.replace(product_section, "").strip()
+    
+    # 상품 목록 추출
+    product_list = []
+    
+    if product_type == PRODUCT_TYPE_DEPOSIT:
+        # 예금/적금 추천 패턴
+        products_pattern = r'(\d+)\.\s*\*\*([^*]+)\*\*\s*\(([^)]+)\)\s*\n\s*-\s*상품유형:\s*([^\n]+)\s*\n\s*-\s*기본금리:\s*([^\n]+)(?:\s*\(최대\s*([^\n)]+)\))?\s*\n\s*-\s*계약기간:\s*([^\n]+)\s*\n\s*-\s*가입금액:\s*([^\n]+)'
+        for p_match in re.finditer(products_pattern, product_section, re.DOTALL):
+            product = {
+                "상품명": p_match.group(2).strip(),
+                "은행명": p_match.group(3).strip(),
+                "상품유형": p_match.group(4).strip(),
+                "기본금리": p_match.group(5).strip(),
+                "계약기간": p_match.group(7).strip(),
+                "가입금액": p_match.group(8).strip()
+            }
+            
+            # 최대우대금리가 있는 경우
+            if p_match.group(6):
+                product["최대우대금리"] = p_match.group(6).strip()
+                
+            product_list.append(product)
+    else:
+        # 펀드 추천 패턴
+        products_pattern = r'(\d+)\.\s*\*\*([^*]+)\*\*\s*\(([^)]+)\)\s*\n\s*-\s*유형:\s*([^\n]+)\s*\n\s*-\s*수익률:\s*([^\n]+)\s*\n\s*-\s*위험등급:\s*([^\n]+)'
+        for p_match in re.finditer(products_pattern, product_section, re.DOTALL):
+            product = {
+                "펀드명": p_match.group(2).strip(),
+                "운용사": p_match.group(3).strip(),
+                "유형": p_match.group(4).strip(),
+                "수익률": p_match.group(5).strip(),
+                "위험등급": p_match.group(6).strip()
+            }
+            product_list.append(product)
+    
+    # 추출한 상품이 없으면 None 반환
+    if not product_list:
+        return reply, None
+    
+    return clean_reply, ProductRecommendation(product_type=product_type, products=product_list)
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks):
     """채팅 메시지 처리 엔드포인트
     
     금융 관련 메시지인지 판단하여 적절한 서비스로 라우팅합니다.
     감정 분석을 함께 수행하여 맞춤형 응답을 제공합니다.
+    필요시 금융 상품 추천 정보를 제공합니다.
     """
     try:
         # 속도 제한 체크
@@ -74,7 +145,33 @@ async def chat(req: ChatRequest, request: Request, background_tasks: BackgroundT
         # 금융 관련 질문인 경우
         if is_finance:
             reply, scen = await get_finance_reply(req.user_id, req.message)
-            response = ChatResponse(reply=reply, scenario=scen, emotion=emotion_result)
+            
+            # 상품 추천 정보 추출
+            clean_reply, product_recommendation = extract_product_recommendation(reply)
+            
+            # 시나리오 정보가 있는 경우 모델에 맞게 변환
+            scenario_result = None
+            if scen:
+                scenario_result = ScenarioResult(
+                    label=scen["label"],
+                    probability=scen["probability"],
+                    key_metrics=scen["key_metrics"]
+                )
+            
+            # 상품 추천 정보가 있는 경우 응답에 포함
+            if product_recommendation:
+                response = ChatResponse(
+                    reply=clean_reply,
+                    scenario=scenario_result,
+                    emotion=emotion_result,
+                    product_recommendation=product_recommendation
+                )
+            else:
+                response = ChatResponse(
+                    reply=reply,
+                    scenario=scenario_result,
+                    emotion=emotion_result
+                )
         else:
             # 일반 대화인 경우
             reply = await get_generic_reply(req.user_id, req.message)

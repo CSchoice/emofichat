@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from app.core.db import SessionMaker
 from app.models.finance import User, CardUsage, Delinquency, BalanceInfo, SpendingPattern, ScenarioLabel
+from sqlalchemy import select, desc
 
 # 로거 설정
 logger = logging.getLogger(__name__)
@@ -16,6 +17,7 @@ async def get_user_metrics(user_id: str) -> Optional[Dict[str, Any]]:
     부분 데이터 처리: 사용자 기본 정보만 있어도 서비스를 제공하며, 테이블별로 데이터가 없는 경우
     기본값을 사용하여 최대한 정보를 제공합니다.
     """
+
     try:
         async with SessionMaker() as sess:
             # 사용자 정보 조회 (필수)
@@ -55,6 +57,30 @@ async def get_user_metrics(user_id: str) -> Optional[Dict[str, Any]]:
             for key, value in user_row.__dict__.items():
                 if not key.startswith('_'):
                     result[key] = value
+
+            card_rows = (
+                await sess.execute(
+                    select(CardUsage)
+                    .where(CardUsage.user_id == user_id)
+                    .order_by(desc(CardUsage.record_date))
+                    .limit(2)
+                )
+            ).scalars().all()
+
+            # 2) 현월·전월 총결제액 계산
+            if len(card_rows) >= 2:
+                cur, prev = card_rows[0], card_rows[1]
+                cur_total = float(cur.credit_usage_3m or 0) + float(cur.check_usage_3m or 0)
+                prev_total = float(prev.credit_usage_3m or 0) + float(prev.check_usage_3m or 0)
+            elif len(card_rows) == 1:
+                cur = card_rows[0]
+                cur_total = float(cur.credit_usage_3m or 0) + float(cur.check_usage_3m or 0)
+                prev_total = 0.0
+            else:
+                cur_total = prev_total = 0.0
+
+            result["total_payment_amount"] = cur_total
+            result["total_payment_amount_전월"] = prev_total
             
             # 각 테이블 데이터 조회 및 설정
             # 각 테이블의 중요도에 따라 필수/선택 지정
