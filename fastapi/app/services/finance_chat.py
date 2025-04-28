@@ -4,6 +4,7 @@ import json
 import backoff
 from typing import Dict, Any, Tuple, Optional, List
 import logging
+import time
 
 from openai import (
     APITimeoutError, APIConnectionError, RateLimitError, BadRequestError
@@ -14,6 +15,7 @@ from app.core.openai_client import client as openai_client
 from app.core.db import SessionMaker
 from app.models.finance import User, CardUsage, Delinquency, BalanceInfo, SpendingPattern, ScenarioLabel
 from app.services.scenario_engine import score_scenarios
+from app.services.topic_detector import analyze_emotion, analyze_message
 # 템플릿 대신 GPT 직접 활용하므로 TEMPLATES 임포트 제거
 from app.services.generic_chat import load_history, save_history
 from app.services.generic_chat import get_generic_reply
@@ -132,10 +134,15 @@ async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[
             reply = await get_generic_reply(user_id, user_msg)
             return reply, None
 
+        # ── 감정 분석 ─────────────────────────────────────────── #
+        emotion_start = time.time()
+        emotion_data = analyze_emotion(user_msg)
+        logger.debug(f"감정 분석 소요 시간: {time.time() - emotion_start:.2f}초")
+        
         # ── 시나리오 판단 ───────────────────────────────────────── #
         label, prob, metrics = score_scenarios(row, user_msg)
         
-        # ── 재무 트렌드 분석 ──────────────────────────────────── #
+        # ── 사용자 재무 데이터 요약 및 트렌드 분석 ───────────────────── #
         finance_trends = analyze_financial_trends(row)
         
         # ── 사용자 재무 데이터 요약 ───────────────────────────────── #
@@ -157,21 +164,27 @@ async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[
             "재정건전성": finance_trends.get("financial_health", "정보없음"),
             "스트레스지수": finance_trends.get("stress_index", 50.0),
             "스트레스수준": finance_trends.get("stress_level", "보통"),
+            "감정상태": emotion_data.get("dominant_emotion", "중립"),
+            "부정감정수준": "높음" if emotion_data.get("is_negative", False) else "낮음",
+            "불안감정수준": "높음" if emotion_data.get("is_anxious", False) else "낮음",
         }
         
         # ── 사용자 대화 히스토리 요약 가져오기 ───────────────────── #
         conversation_history = await get_compact_history(user_id)
         
-        # ── GPT로 직접 맞춤형 조언 생성 ────────────────────────── #
-        sys_prompt = (
-            "너는 전문 재무 상담 챗봇이야. 사용자의 재무 데이터, 대화 맥락, 질문을 종합적으로 분석해서 구체적이고 실용적인 맞춤형 조언을 제공해야 해. "
-            "답변은 친근한 한국어로 2~3문장, 숫자는 % 대신 '퍼센트' 표기, 어려운 금융 용어는 풀어서 설명해. "
-            "사용자의 최근 대화 내용과 재무 트렌드를 고려하여 일관성 있고 개인화된 조언을 제공해주세요."
-        )
+        # ── 1. 개인화된 재무 캐릭터 모델 생성 ───────────────────── #
+        # 사용자 재무 데이터와 감정 분석 결과에 기반하여 성향, 태도, 습관 추론
+        user_profile = infer_user_profile(row, finance_trends, conversation_history, user_msg, emotion_data)
+        
+        # ── GPT로 맞춤형 조언 생성을 위한 프롬프트 구성 ────────────────── #
+        sys_prompt = build_finance_chat_prompt(row, finance_trends, user_profile, label)
         
         # 사용자 재무 데이터, 대화 히스토리, 질문을 함께 전달하여 맞춤형 조언 요청
         user_content = f"""[사용자 재무 데이터]
 {user_finance_summary}
+
+[사용자 성향 프로필]
+{user_profile}
 
 {conversation_history if conversation_history else ""}
 
@@ -224,3 +237,169 @@ async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[
         logger.error(f"금융 채팅 처리 중 오류 발생: {str(e)}")
         reply = await get_generic_reply(user_id, user_msg)
         return reply, None
+
+
+# ───────────────────── 1. 개인화된 재무 캐릭터 모델 도입 ───────────────────── #
+def infer_user_profile(row: Dict, finance_trends: Dict, conversation_history: str, user_msg: str, emotion_data: Dict = None) -> Dict:
+    """
+    사용자 재무 데이터를 바탕으로 재무 성향 추론
+    
+    Parameters:
+    -----------
+    row : dict
+        사용자의 재무 관련 데이터
+    finance_trends : dict
+        재무 트렌드 분석 결과
+    conversation_history : str
+        이전 대화 내용
+    user_msg : str
+        현재 사용자 메시지
+    emotion_data : dict
+        감정 분석 결과
+        
+    Returns:
+    --------
+    dict
+        추론된 사용자 프로필
+    """
+    profile = {}
+    
+    # 재무성향 추론
+    if row.get("liquidity_score", 50) > 70 and finance_trends.get("balance_trend") == "지속 증가":
+        profile["재무성향"] = "보수적 소비자"
+    elif row.get("card_usage_b0m", 0) > row.get("avg_card_usage_3m", 0) * 1.2:
+        profile["재무성향"] = "과소비 경향 있음"
+    elif finance_trends.get("financial_health") == "주의 필요":
+        profile["재무성향"] = "위험 감수 소비자"
+    elif row.get("investment_ratio", 0) > 50:
+        profile["재무성향"] = "위험 선호 투자자"
+    else:
+        profile["재무성향"] = "일반적 소비자"
+        
+    # 금융단계 추론
+    age = row.get("age", 35)
+    if age < 30:
+        profile["금융단계"] = "사회초년생"
+    elif 30 <= age < 45:
+        profile["금융단계"] = "자산형성기"
+    elif 45 <= age < 55:
+        profile["금융단계"] = "자녀양육기"
+    else:
+        profile["금융단계"] = "은퇴준비기"
+        
+    # 스트레스 반응 추론 (감정 분석 결과 활용)
+    if emotion_data and emotion_data.get("is_anxious", False):
+        profile["스트레스 반응"] = "감정적 불안감이 높은 상태"
+    elif emotion_data and emotion_data.get("dominant_emotion") == "화남":
+        profile["스트레스 반응"] = "금융 문제에 대한 분노감 표출"
+    elif emotion_data and emotion_data.get("dominant_emotion") == "슬픔":
+        profile["스트레스 반응"] = "금융 문제에 대한 좌절감 표출"
+    elif "조언" in user_msg or "도움" in user_msg or "어떻게" in user_msg:
+        profile["스트레스 반응"] = "지출 조절보다는 외부 상담을 선호함"
+    elif row.get("stress_index", 50) > 70:
+        profile["스트레스 반응"] = "금융 스트레스가 높은 상태"
+    elif row.get("self_adjustment_history", 0) > 3:
+        profile["스트레스 반응"] = "자가 조절형"
+    else:
+        profile["스트레스 반응"] = "스스로 해결하려는 성향"
+        
+    # 감정 상태 추가
+    if emotion_data:
+        # 기본 감정 매핑 정의
+        emotion_mapping = {
+            "화남": "anger",
+            "혐오": "disgust", 
+            "공포": "fear",
+            "행복": "happiness",
+            "중립": "neutral",
+            "슬픔": "sadness",
+            "놀람": "surprise",
+            "걱정": "anxiety"  # 추가 감정
+        }
+        
+        # 지정된 감정 상태 사용
+        dominant_emotion = emotion_data.get("dominant_emotion", "중립")
+        
+        # 스트레스 반응 정의
+        if dominant_emotion == "화남":
+            profile["스트레스 반응"] = "금융 문제에 대한 분노감 표출"
+        elif dominant_emotion == "슬픔":
+            profile["스트레스 반응"] = "금융 문제에 대한 좌절감 표출"
+        elif dominant_emotion == "공포" or dominant_emotion == "걱정":
+            profile["스트레스 반응"] = "금융에 대한 불안증 높음"
+        elif emotion_data.get("is_anxious", False):
+            profile["스트레스 반응"] = "감정적 불안감이 높은 상태"
+        
+        # 감정 상태 추가
+        profile["감정 상태"] = dominant_emotion
+        profile["감정 강도"] = "강함" if emotion_data.get("dominant_score", 0) > 0.7 else "보통"
+    
+    return profile
+
+
+# ───────────────────── 재무 상담 프롬프트 구성 함수 ───────────────────── #
+def build_finance_chat_prompt(row: Dict, finance_trends: Dict, user_profile: Dict, label: str) -> str:
+    """
+    사용자 재무 데이터 및 메시지를 바탕으로 재무 상담 프롬프트 생성
+    
+    Parameters:
+    -----------
+    row : dict
+        사용자의 재무 관련 데이터
+    finance_trends : dict
+        재무 트렌드 분석 결과
+    user_profile : dict
+        추론된 사용자 성향 정보
+    label : str
+        시나리오 라벨
+        
+    Returns:
+    --------
+    str
+        GPT 프롬프트
+    """
+    # 기본 시스템 프롬프트 설정
+    sys_prompt = (
+        "너는 전문 재무 상담 챗봇이야. 사용자의 재무 데이터, 대화 맥락, 질문을 종합적으로 분석해서 구체적이고 실용적인 맞춤형 조언을 제공해야 해. "
+        "답변은 반드시 비교적 짧게(최대 100자 이내) 작성하고, 친근한 한국어로 1~2문장만 작성해. 숫자는 % 대신 '퍼센트' 표기, 어려운 금융 용어는 풀어서 설명해. "
+        "사용자의 최근 대화 내용과 재무 트렌드를 고려하여 일관성 있고 짧지만 핵심적인 조언을 제공해."
+    )
+    
+    # 3. 핵심 지표 강조 유도
+    sys_prompt += """
+
+특히 아래 주요 지표가 변화했을 경우, 조언에서 우선적으로 반영해줘:
+- 최근 연체 발생 여부
+- 잔액 급감 또는 카드사용 급증
+- 유동성 점수 40 이하
+"""
+    
+    # 5. 긴급/위험 상태 경고 강화
+    if row.get("is_delinquent", 0) or finance_trends.get("stress_index", 0) > 80:
+        sys_prompt += """
+
+사용자의 재무 상태가 위험하니, 반드시 신중하고 경고성 있는 조언을 해줘.
+"""
+    
+    # 8. 시나리오 충돌 또는 다중 시나리오 대응
+    sys_prompt += """
+
+복수의 재무 문제가 감지되면 가장 시급한 문제부터 조언을 제공해. 예: 연체 > 잔액 감소 > 과소비
+"""
+    
+    # 12. 상담 타입 분기 (정보형 vs 행동형 vs 감정형)
+    sys_prompt += """
+
+사용자의 말투와 감정 상태에 따라, 정보형/행동형/공감형 조언 중 가장 적절한 스타일로 말해줘.
+- 정보형: "○○란 이런 것이고, 이렇게 관리해야 해요."
+- 행동형: "○○을 꼭 확인하거나 ○○를 신청해보세요."
+- 감정형: "요즘 참 힘드셨죠. 조심스레 추천드리면..."
+
+특히 다음 감정 상태에 따라 상담 스타일을 조정해야 합니다:
+- 슬픔/걱정 감정일 경우: 공감형 접근을 우선하고, 희망적 메시지 포함
+- 화남 감정일 경우: 객관적 정보 제공 후 실질적 해결책 제시
+- 중립 감정일 경우: 정보형 접근 우선
+- 행복 감정일 경우: 긍정적 피드백과 함께 미래 계획 논의
+"""
+    
+    return sys_prompt

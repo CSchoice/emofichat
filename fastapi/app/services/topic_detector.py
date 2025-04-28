@@ -1,4 +1,12 @@
 import re
+import logging
+from typing import Tuple, Dict, Any
+
+# 감정 분석기 임포트
+from app.services.emotion_analyzer import get_emotion_analyzer
+
+# 로거 설정
+logger = logging.getLogger(__name__)
 
 # 금융 관련 단어 목록
 FINANCE_KEYWORDS = [
@@ -44,3 +52,55 @@ def is_finance_topic(message: str) -> bool:
             return True
     
     return False
+
+def analyze_emotion(message: str) -> Dict[str, Any]:
+    """
+    사용자 메시지의 감정을 분석
+    
+    Args:
+        message: 사용자 메시지
+        
+    Returns:
+        감정 분석 결과가 담긴 딕셔너리
+    """
+    try:
+        emotion_analyzer = get_emotion_analyzer()
+        emotion_state = emotion_analyzer.get_emotional_state(message)
+        return emotion_state
+    except Exception as e:
+        logger.error(f"감정 분석 중 오류 발생: {str(e)}")
+        # 오류 발생 시 기본값 반환
+        return {
+            "dominant_emotion": "중립",
+            "dominant_score": 1.0,
+            "is_negative": False,
+            "is_anxious": False,
+            "all_emotions": {"중립": 1.0}
+        }
+
+def analyze_message(message: str) -> Dict[str, Any]:
+    """
+    사용자 메시지를 종합적으로 분석
+    
+    Args:
+        message: 사용자 메시지
+        
+    Returns:
+        메시지 분석 결과가 담긴 딕셔너리
+        {
+            "is_finance": True,
+            "emotion": {
+                "dominant_emotion": "걱정",
+                "dominant_score": 0.75,
+                "is_negative": True,
+                "is_anxious": True,
+                "all_emotions": {...}
+            }
+        }
+    """
+    analysis = {
+        "is_finance": is_finance_topic(message),
+        "emotion": analyze_emotion(message)
+    }
+    
+    return analysis

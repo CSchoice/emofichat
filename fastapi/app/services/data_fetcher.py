@@ -148,7 +148,10 @@ async def get_user_metrics(user_id: str) -> Optional[Dict[str, Any]]:
             
             # 3-2. 분석에 필요한 추가 계산 필드 처리
             try:
-                balance_ratio = result["balance_b0m"] / (result["avg_balance_3m"] + 0.001)
+                # decimal과 float 간 연산 오류 해결을 위해 형변환 처리 추가
+                balance_b0m = float(result["balance_b0m"]) if result["balance_b0m"] is not None else 0.0
+                avg_balance_3m = float(result["avg_balance_3m"]) if result["avg_balance_3m"] is not None else 0.001
+                balance_ratio = balance_b0m / (avg_balance_3m + 0.001)  # 0 나눗셈 방지를 위해 0.001 추가
                 result["liquidity_score"] = min(100, max(0, 100 - (balance_ratio * 20)))
             except KeyError:
                 result["liquidity_score"] = 50.0  # 키가 없는 경우 기본값

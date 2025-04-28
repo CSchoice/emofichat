@@ -6,10 +6,11 @@ from dotenv import load_dotenv, find_dotenv   # pip install python-dotenv
 from typing import Dict, Any, Optional
 
 # ① .env 파일 찾기 (루트 위치)
-DOTENV = find_dotenv() or Path(__file__).resolve().parents[2] / ".env"
+BASE_DIR = Path(__file__).resolve().parents[2]
+DOTENV_PATH = BASE_DIR / ".env"
 
 # ② 환경변수 주입 (이미 있으면 override 안 함)
-load_dotenv(DOTENV, override=False)
+load_dotenv(dotenv_path=DOTENV_PATH, override=False)
 
 # ③ 중앙화된 설정 관리 클래스
 class Settings(BaseModel):
@@ -28,7 +29,7 @@ class Settings(BaseModel):
     
     # 데이터베이스 설정
     DB_URL: str = Field(
-        default="mysql+aiomysql://emofinance:emofinance@mysql_emofinance:3306/emofinance", 
+        default="mysql+aiomysql://root:emo1234secure!@localhost:5431/emofinance", 
         env="DB_URL"
     )
     
