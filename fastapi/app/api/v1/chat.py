@@ -6,7 +6,7 @@ from app.services.generic_chat import get_generic_reply
 from app.services.finance_chat import get_finance_reply
 from app.services.product_recommender import PRODUCT_TYPE_DEPOSIT, PRODUCT_TYPE_FUND
 import logging
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 import time
 import re
 
@@ -44,7 +44,7 @@ async def log_chat(req: ChatRequest, response: ChatResponse, is_finance: bool, e
         f"msg_len={len(req.message)}, reply_len={len(response.reply)}"
     )
 
-def extract_product_recommendation(reply: str) -> tuple[str, Optional[ProductRecommendation]]:
+def extract_product_recommendation(reply: str) -> Tuple[str, Optional[ProductRecommendation]]:
     """
     응답 텍스트에서 상품 추천 정보를 추출하고 텍스트와 구조화된 데이터로 분리합니다.
     
@@ -55,16 +55,20 @@ def extract_product_recommendation(reply: str) -> tuple[str, Optional[ProductRec
         (기본 응답 텍스트, 추출된 상품 추천 정보)
     """
     # 상품 추천 섹션 판별 패턴
-    recommendation_pattern = r'📌\s*\*\*(예금/적금|펀드)\s*상품\s*추천\*\*\s*\n\n(.*?)(?=해당\s*상품에\s*관심이|$)'
+    recommendation_pattern = r'📌\s*\*\*(예금/적금|펀드)\s*상품\s*추천\*\*\s*\n\n([\s\S]*?)(?=해당\s*상품에\s*관심이|$)'
     
     # 상품 추천 섹션 검색
     match = re.search(recommendation_pattern, reply, re.DOTALL)
     if not match:
+        logger.debug("상품 추천 섹션을 찾을 수 없습니다.")
         return reply, None
     
     # 상품 추천 섹션 추출
     product_type_text = match.group(1)
     product_section = match.group(0)
+    
+    logger.debug(f"발견된 상품 유형: {product_type_text}")
+    logger.debug(f"추출된 상품 섹션: {product_section}")
     
     # 상품 유형 결정
     product_type = PRODUCT_TYPE_DEPOSIT if "예금" in product_type_text or "적금" in product_type_text else PRODUCT_TYPE_FUND
@@ -76,39 +80,98 @@ def extract_product_recommendation(reply: str) -> tuple[str, Optional[ProductRec
     product_list = []
     
     if product_type == PRODUCT_TYPE_DEPOSIT:
-        # 예금/적금 추천 패턴
-        products_pattern = r'(\d+)\.\s*\*\*([^*]+)\*\*\s*\(([^)]+)\)\s*\n\s*-\s*상품유형:\s*([^\n]+)\s*\n\s*-\s*기본금리:\s*([^\n]+)(?:\s*\(최대\s*([^\n)]+)\))?\s*\n\s*-\s*계약기간:\s*([^\n]+)\s*\n\s*-\s*가입금액:\s*([^\n]+)'
-        for p_match in re.finditer(products_pattern, product_section, re.DOTALL):
-            product = {
-                "상품명": p_match.group(2).strip(),
-                "은행명": p_match.group(3).strip(),
-                "상품유형": p_match.group(4).strip(),
-                "기본금리": p_match.group(5).strip(),
-                "계약기간": p_match.group(7).strip(),
-                "가입금액": p_match.group(8).strip()
-            }
-            
-            # 최대우대금리가 있는 경우
-            if p_match.group(6):
-                product["최대우대금리"] = p_match.group(6).strip()
+        # 예금/적금 추천 패턴 - 좋은 방법은 여러 버전의 패턴을 시도하는 것
+        # 패턴 1: 일반적인 포맷
+        patterns = [
+            # 패턴 1: 정규 포맷
+            r'(\d+)\.\s*\*\*([^*]+)\*\*\s*\(([^)]+)\)\s*\n\s*-\s*상품유형:\s*([^\n]+)\s*\n\s*-\s*기본금리:\s*([^\n]+)(?:\s*\(최대\s*([^\n)]+)\))?\s*\n\s*-\s*계약기간:\s*([^\n]+)\s*\n\s*-\s*가입금액:\s*([^\n]+)',
+            # 패턴 2: 유연성 있는 패턴 (개행수에 유의)
+            r'(\d+)\.\s*\*\*([^*]+)\*\*\s*\(([^)]+)\)\s*\n\s*-\s*상품유형:\s*([^\n]+)\s*\n\s*-\s*기본금리:\s*([^\n]+)',
+            # 패턴 3: 더 유연한 패턴 - 텍스트만 맞으면 상품으로 간주
+            r'\*\*([^*]+)\*\*\s*\(([^)]+)\)'
+        ]
+        
+        # 배열의 각 패턴을 순회하며 매칭 시도
+        for pattern in patterns:
+            for p_match in re.finditer(pattern, product_section, re.DOTALL):
+                # 패턴별로 추출 로직이 다름
+                if pattern == patterns[0]:  # 패턴 1: 정규 포맷
+                    product = {
+                        "상품명": p_match.group(2).strip(),
+                        "은행명": p_match.group(3).strip(),
+                        "상품유형": p_match.group(4).strip(),
+                        "기본금리": p_match.group(5).strip(),
+                        "계약기간": p_match.group(7).strip(),
+                        "가입금액": p_match.group(8).strip()
+                    }
+                    
+                    # 최대우대금리가 있는 경우
+                    if p_match.group(6):
+                        product["최대우대금리"] = p_match.group(6).strip()
+                elif pattern == patterns[1]:  # 패턴 2: 유연성 있는 패턴
+                    product = {
+                        "상품명": p_match.group(2).strip(),
+                        "은행명": p_match.group(3).strip(),
+                        "상품유형": p_match.group(4).strip(),
+                        "기본금리": p_match.group(5).strip()
+                    }
+                else:  # 패턴 3: 최소 정보만 추출
+                    product = {
+                        "상품명": p_match.group(1).strip(),
+                        "은행명": p_match.group(2).strip()
+                    }
                 
-            product_list.append(product)
+                # 이미 목록에 있는 상품인지 체크 (중복 상품 필터링)
+                if not any(p.get("상품명") == product.get("상품명") for p in product_list):
+                    product_list.append(product)
+        
+        # 상품이 출력되지 않을 경우 다른 방법 시도
+        if not product_list:
+            logger.debug("일반 패턴으로 상품을 추출할 수 없습니다. 모든 텍스트를 처리합니다.")
+            # 추출 실패 시 빈 목록을 리턴하고 전체 텍스트를 사용
+            return reply, None
     else:
         # 펀드 추천 패턴
-        products_pattern = r'(\d+)\.\s*\*\*([^*]+)\*\*\s*\(([^)]+)\)\s*\n\s*-\s*유형:\s*([^\n]+)\s*\n\s*-\s*수익률:\s*([^\n]+)\s*\n\s*-\s*위험등급:\s*([^\n]+)'
-        for p_match in re.finditer(products_pattern, product_section, re.DOTALL):
-            product = {
-                "펀드명": p_match.group(2).strip(),
-                "운용사": p_match.group(3).strip(),
-                "유형": p_match.group(4).strip(),
-                "수익률": p_match.group(5).strip(),
-                "위험등급": p_match.group(6).strip()
-            }
-            product_list.append(product)
+        patterns = [
+            # 패턴 1: 정규 포맷
+            r'(\d+)\.\s*\*\*([^*]+)\*\*\s*\(([^)]+)\)\s*\n\s*-\s*유형:\s*([^\n]+)\s*\n\s*-\s*수익률:\s*([^\n]+)\s*\n\s*-\s*위험등급:\s*([^\n]+)',
+            # 패턴 2: 최소 정보만 추출
+            r'\*\*([^*]+)\*\*\s*\(([^)]+)\)'
+        ]
+        
+        for pattern in patterns:
+            for p_match in re.finditer(pattern, product_section, re.DOTALL):
+                if pattern == patterns[0]:  # 패턴 1: 정규 포맷
+                    product = {
+                        "펀드명": p_match.group(2).strip(),
+                        "운용사": p_match.group(3).strip(),
+                        "유형": p_match.group(4).strip(),
+                        "수익률": p_match.group(5).strip(),
+                        "위험등급": p_match.group(6).strip()
+                    }
+                else:  # 패턴 2: 최소 정보만 추출
+                    product = {
+                        "펀드명": p_match.group(1).strip(),
+                        "운용사": p_match.group(2).strip()
+                    }
+                
+                # 이미 목록에 있는 상품인지 체크 (중복 상품 필터링)
+                if not any(p.get("펀드명") == product.get("펀드명") for p in product_list):
+                    product_list.append(product)
+        
+        # 상품이 출력되지 않을 경우 다른 방법 시도
+        if not product_list:
+            logger.debug("펀드 패턴으로 상품을 추출할 수 없습니다. 모든 텍스트를 처리합니다.")
+            # 추출 실패 시 빈 목록을 리턴하고 전체 텍스트를 사용
+            return reply, None
     
     # 추출한 상품이 없으면 None 반환
     if not product_list:
+        logger.debug("추출된 상품이 없습니다.")
         return reply, None
+    
+    # 디버그 로그
+    logger.info(f"상품 추출 결과: {len(product_list)}개 추출됨")
     
     return clean_reply, ProductRecommendation(product_type=product_type, products=product_list)
 
@@ -158,10 +221,14 @@ async def chat(req: ChatRequest, request: Request, background_tasks: BackgroundT
                     key_metrics=scen["key_metrics"]
                 )
             
+            # 상품 추천 키워드 확인 (정규식 일치 여부와 관계없이 체크)
+            has_product_keywords = any(keyword in reply for keyword in ["**예금/적금 상품 추천**", "**펀드 상품 추천**", "기본금리", "위험등급", "은행명", "펀드명"])
+            
             # 상품 추천 정보가 있는 경우 응답에 포함
-            if product_recommendation:
+            if product_recommendation or has_product_keywords:
+                # 정규식으로 추출된 상품이 있으면 그것을 사용하고, 없다면 reply 전체를 달아주기
                 response = ChatResponse(
-                    reply=clean_reply,
+                    reply=reply,  # 클린 리플라이가 아니라 전체 리플라이를 활용
                     scenario=scenario_result,
                     emotion=emotion_result,
                     product_recommendation=product_recommendation

@@ -1,24 +1,50 @@
-"""
-금융 상품 추천 서비스
-
-사용자의 감정 상태, 재무 상태, 선호도 등을 고려하여 적합한 금융 상품을 추천합니다.
-"""
-
 import logging
-from typing import Dict, List, Any, Optional, Tuple
-from sqlalchemy import select, and_, or_, text
-from random import sample
+from typing import Dict, List, Any, Optional
 
+from sqlalchemy import select, text
 from app.core.db import SessionMaker
 from app.models.finance import User, CardUsage, Delinquency, BalanceInfo, SpendingPattern, ScenarioLabel
-# 필요한 금융 상품 모델 추가 import
+
+from app.services.product_formatter import format_product_recommendation
 
 # 로거 설정
 logger = logging.getLogger(__name__)
 
-# 상품 타입 정의
 PRODUCT_TYPE_DEPOSIT = "deposit"  # 예금/적금
-PRODUCT_TYPE_FUND = "fund"        # 펀드
+PRODUCT_TYPE_FUND = "fund"         # 펀드
+
+# 유틸리티 함수
+def format_amount(amount: int) -> str:
+    """금액을 한국식으로 포맷팅 (1000 -> 1,000원, 1000000 -> 100만원)"""
+    if not amount:
+        return ""
+    
+    if amount >= 10000:
+        # 만원 단위로 표시
+        man = amount // 10000
+        remainder = amount % 10000
+        
+        if remainder == 0:
+            return f"{man:,}만원"
+        else:
+            return f"{man:,}만 {remainder:,}원"
+    else:
+        return f"{amount:,}원"
+
+async def get_bank_info(bank_id: int, session) -> dict:
+    """은행 ID로 은행 정보 조회"""
+    try:
+        query = text("SELECT id, name FROM bank WHERE id = :bank_id").bindparams(bank_id=bank_id)
+        result = await session.execute(query)
+        row = result.fetchone()
+        
+        if row:
+            return {"id": row[0], "name": row[1]}
+        else:
+            return {"id": None, "name": "알 수 없음"}
+    except Exception as e:
+        logger.error(f"[get_bank_info] 실패: {e}")
+        return {"id": None, "name": "오류 발생"}
 
 async def recommend_products(
     user_id: str,
@@ -29,90 +55,58 @@ async def recommend_products(
 ) -> List[Dict[str, Any]]:
     """
     사용자 정보와 감정 상태를 기반으로 금융 상품을 추천합니다.
-    
-    Args:
-        user_id: 사용자 ID
-        user_data: 사용자 재무 데이터
-        emotion_data: 감정 분석 결과
-        product_type: 상품 유형 (deposit: 예금/적금, fund: 펀드)
-        limit: 추천할 상품 개수
-        
-    Returns:
-        추천 상품 목록
     """
+
     try:
-        # 상품 타입이 지정되지 않으면 사용자 상태에 따라 결정
         if not product_type:
             product_type = _determine_product_type(user_data, emotion_data)
-            
-        # 상품 타입에 따라 다른 추천 로직 실행
+
         if product_type == PRODUCT_TYPE_DEPOSIT:
-            return await recommend_deposit_products(user_id, user_data, emotion_data, limit)
+            products = await recommend_deposit_products(user_id, user_data, emotion_data, limit)
         elif product_type == PRODUCT_TYPE_FUND:
-            return await recommend_fund_products(user_id, user_data, emotion_data, limit)
+            products = await recommend_fund_products(user_id, user_data, emotion_data, limit)
         else:
             logger.warning(f"지원하지 않는 상품 타입: {product_type}")
-            return []
-            
+            products = []
+
+        return products
+
     except Exception as e:
-        logger.error(f"상품 추천 중 오류 발생: {str(e)}")
+        logger.error(f"[recommend_products] 추천 실패: {e}")
         return []
 
 def _determine_product_type(user_data: Dict[str, Any], emotion_data: Dict[str, Any]) -> str:
     """
-    사용자 상태에 따라 적절한 상품 타입을 결정합니다.
-    
-    Args:
-        user_data: 사용자 재무 데이터
-        emotion_data: 감정 분석 결과
-        
-    Returns:
-        추천할 상품 타입 (deposit 또는 fund)
+    감정, 재무 상태를 고려해 deposit/fund 중 추천할 상품 타입 결정
     """
-    # 기본값은 예금/적금 상품
-    product_type = PRODUCT_TYPE_DEPOSIT
-    
-    # 위험 회피 성향 판단
-    risk_averse = False
-    
-    # 감정 상태가 불안/걱정/공포인 경우 위험 회피 경향
-    if emotion_data:
-        dominant_emotion = emotion_data.get("dominant_emotion", "중립")
-        if dominant_emotion in ["공포", "걱정", "슬픔"] or emotion_data.get("is_anxious", False):
-            risk_averse = True
-    
-    # 재무 상태가 불안정한 경우 위험 회피 경향
+    dominant_emotion = emotion_data.get("dominant_emotion", "중립") if emotion_data else "중립"
     financial_health = user_data.get("재정건전성", "정보없음")
+    liquidity_score = user_data.get("유동성점수", 50.0)
+    age = user_data.get("나이", 35)
+    is_anxious = emotion_data.get("is_anxious", False) if emotion_data else False
+
+    risk_averse = False
+
+    if dominant_emotion in ["공포", "걱정", "슬픔"] or is_anxious:
+        risk_averse = True
     if financial_health in ["주의 필요", "위험", "매우 위험"]:
         risk_averse = True
-        
-    # 유동성 점수가 낮은 경우 위험 회피 경향
-    liquidity_score = user_data.get("유동성점수", 50.0)
     if liquidity_score < 40:
         risk_averse = True
-        
-    # 연체 이력이 있는 경우 위험 회피 경향
     if user_data.get("연체여부", False):
         risk_averse = True
-    
-    # 위험 회피 성향이 높으면 예금/적금 상품 추천
+
     if risk_averse:
         return PRODUCT_TYPE_DEPOSIT
-    
-    # 감정이 행복하고 재무상태가 양호한 경우 펀드 상품 추천
+
     if dominant_emotion == "행복" and financial_health in ["양호", "좋음", "매우 좋음"]:
         return PRODUCT_TYPE_FUND
-    
-    # 재무상태가 좋고 유동성 점수가 높은 경우 펀드 상품 추천
     if financial_health in ["양호", "좋음", "매우 좋음"] and liquidity_score > 70:
         return PRODUCT_TYPE_FUND
-    
-    # 나이가 젊고 재무상태가 안정적인 경우 펀드 상품 추천
-    age = user_data.get("나이", 35)
     if 20 <= age <= 40 and financial_health not in ["주의 필요", "위험", "매우 위험"]:
         return PRODUCT_TYPE_FUND
-        
-    return product_type
+
+    return PRODUCT_TYPE_DEPOSIT
 
 async def recommend_deposit_products(
     user_id: str,
@@ -121,172 +115,145 @@ async def recommend_deposit_products(
     limit: int = 3
 ) -> List[Dict[str, Any]]:
     """
-    예금/적금 상품을 추천합니다.
-    
-    Args:
-        user_id: 사용자 ID
-        user_data: 사용자 재무 데이터
-        emotion_data: 감정 분석 결과
-        limit: 추천할 상품 개수
-        
-    Returns:
-        추천 상품 목록
+    예금/적금 상품 추천
     """
+
     try:
+        logger.debug(f"[recommend_deposit_products] 시작 - user_id: {user_id}, limit: {limit}")
         async with SessionMaker() as session:
-            # 사용자 맞춤 추천 로직 구현
-            # 1. 연령대에 따른 추천
+            logger.debug("DB 세션 생성 성공")
+            conditions = ["기본금리 IS NOT NULL", "상품명 IS NOT NULL"]
+            params = {"limit": limit}
+
+            # 연령 필터
             age = user_data.get("나이", 35)
-            age_condition = ""
-            
             if age < 19:
-                age_condition = "가입대상고객_조건 LIKE '%어린이%' OR 가입대상고객_조건 LIKE '%청소년%'"
+                conditions.append("(가입대상고객_조건 LIKE '%어린이%' OR 가입대상고객_조건 LIKE '%청소년%')")
             elif 19 <= age < 24:
-                age_condition = "가입대상고객_조건 LIKE '%대학생%' OR 가입대상고객_조건 LIKE '%청년%'"
+                conditions.append("(가입대상고객_조건 LIKE '%대학생%' OR 가입대상고객_조건 LIKE '%청년%')")
             elif 24 <= age < 35:
-                age_condition = "가입대상고객_조건 LIKE '%사회초년생%' OR 가입대상고객_조건 LIKE '%청년%'"
-            elif 65 <= age:
-                age_condition = "가입대상고객_조건 LIKE '%시니어%' OR 가입대상고객_조건 LIKE '%노인%' OR 가입대상고객_조건 LIKE '%은퇴%'"
-            
-            # 2. 감정 상태에 따른 조정
-            emotion_condition = ""
-            if emotion_data:
-                dominant_emotion = emotion_data.get("dominant_emotion", "중립")
-                
-                # 불안/걱정 감정인 경우 안정적인 상품 우선
-                if dominant_emotion in ["공포", "걱정", "슬픔"] or emotion_data.get("is_anxious", False):
-                    emotion_condition = "예금입출금방식 = '정기예금' AND 기본금리 >= 3.0"
-                # 행복/중립 감정인 경우 다양한 상품 추천
-                elif dominant_emotion in ["행복", "중립"]:
-                    emotion_condition = "우대금리조건여부 = 'Y' AND 최대우대금리 > 0"
-            
-            # 3. 재무 상태에 따른 조정
-            financial_condition = ""
+                conditions.append("(가입대상고객_조건 LIKE '%사회초년생%' OR 가입대상고객_조건 LIKE '%청년%')")
+            elif age >= 65:
+                conditions.append("(가입대상고객_조건 LIKE '%시니어%' OR 가입대상고객_조건 LIKE '%노인%' OR 가입대상고객_조건 LIKE '%은퇴%')")
+
+            # 감정 필터
+            dominant_emotion = emotion_data.get("dominant_emotion", "중립") if emotion_data else "중립"
+            if dominant_emotion in ["공포", "걱정", "슬픔"] or emotion_data.get("is_anxious", False):
+                conditions.append("(예금입출금방식 = '정기예금' AND 기본금리 >= 3.0)")
+            elif dominant_emotion in ["행복", "중립"]:
+                conditions.append("(우대금리조건여부 = 'Y' AND 최대우대금리 > 0)")
+
+            # 재무상태 필터
             liquidity_score = user_data.get("유동성점수", 50.0)
-            
             if liquidity_score < 30:
-                # 유동성이 낮은 경우 자유입출금식 상품 추천
-                financial_condition = "예금입출금방식 = '자유입출금식'"
-            elif 30 <= liquidity_score < 70:
-                # 보통 유동성인 경우 다양한 상품 추천
-                financial_condition = "1=1"  # 모든 상품
-            else:
-                # 유동성이 높은 경우 장기 상품 추천
-                financial_condition = "계약기간개월수_최대구간 >= '12'"
-            
-            # 4. 통합 쿼리 구성
-            conditions = []
-            if age_condition:
-                conditions.append(f"({age_condition})")
-            if emotion_condition:
-                conditions.append(f"({emotion_condition})")
-            if financial_condition:
-                conditions.append(f"({financial_condition})")
-            
-            # 기본 조건 추가
-            conditions.append("기본금리 IS NOT NULL")
-            conditions.append("상품명 IS NOT NULL")
-            
-            # 조건 연결
-            where_clause = " AND ".join(conditions) if conditions else "1=1"
-            
-            # 쿼리 실행
+                conditions.append("예금입출금방식 = '자유입출금식'")
+            elif liquidity_score >= 70:
+                conditions.append("계약기간개월수_최대구간 >= '12'")
+
+            where_clause = " AND ".join(conditions)
+
             query = text(f"""
                 SELECT 
-                    은행명, 상품명, 예금입출금방식, 기본금리, 최대우대금리, 
-                    계약기간개월수_최소구간, 계약기간개월수_최대구간, 
-                    가입금액_최소구간, 가입금액_최대구간, 
-                    상품개요_설명
+                    은행명, 상품명, 예금입출금방식, 기본금리, 최대우대금리,
+                    계약기간개월수_최소구간, 계약기간개월수_최대구간,
+                    가입금액_최소구간, 가입금액_최대구간, 상품개요_설명
                 FROM bank_deposit
                 WHERE {where_clause}
                 ORDER BY 기본금리 DESC
                 LIMIT :limit
-            """).bindparams(limit=limit)
-            
-            result = await session.execute(query)
-            rows = result.fetchall()
-            
-            # 결과 포맷팅
-            products = []
-            for row in rows:
-                product = {
-                    "은행명": row[0],
-                    "상품명": row[1],
-                    "상품유형": row[2],
-                    "기본금리": row[3],
-                    "최대우대금리": row[4],
-                    "계약기간": f"{row[5]}~{row[6]}개월",
-                    "가입금액": f"{row[7]}~{row[8]}",
-                    "설명": row[9]
-                }
-                products.append(product)
-            
-            return products if products else await _get_fallback_deposit_products(limit)
-    
-    except Exception as e:
-        logger.error(f"예금/적금 상품 추천 중 오류 발생: {str(e)}")
-        return await _get_fallback_deposit_products(limit)
+            """).bindparams(**params)
+            logger.debug(f"쿼리 생성: {query}")
 
-async def _get_fallback_deposit_products(limit: int = 3) -> List[Dict[str, Any]]:
-    """
-    기본 예금/적금 상품 목록을 반환합니다. (오류 발생 시 폴백)
-    """
-    try:
-        async with SessionMaker() as session:
-            query = text("""
-                SELECT 
-                    은행명, 상품명, 예금입출금방식, 기본금리, 최대우대금리, 
-                    계약기간개월수_최소구간, 계약기간개월수_최대구간, 
-                    가입금액_최소구간, 가입금액_최대구간, 
-                    상품개요_설명
-                FROM bank_deposit
-                WHERE 기본금리 IS NOT NULL
-                ORDER BY 기본금리 DESC
-                LIMIT :limit
-            """).bindparams(limit=limit)
-            
-            result = await session.execute(query)
-            rows = result.fetchall()
-            
+            try:
+                logger.debug("쿼리 실행 시작")
+                result = await session.execute(query)
+                rows = result.fetchall()
+                logger.debug(f"쿼리 실행 성공, {len(rows)}개 결과 조회됨")
+            except Exception as exe:
+                logger.error(f"쿼리 실행 실패: {exe}")
+                raise
+
             products = []
             for row in rows:
-                product = {
+                # 계약기간 포맷팅 개선
+                period_min = row[5] if row[5] and row[5] not in ['제한없음', '없음', ''] else None
+                period_max = row[6] if row[6] and row[6] not in ['제한없음', '없음', ''] else None
+                
+                if period_min and period_max and period_min == period_max:
+                    period_str = f"{period_min}개월"
+                elif period_min and period_max:
+                    period_str = f"{period_min}~{period_max}개월"
+                elif period_min:
+                    period_str = f"{period_min}개월 이상"
+                elif period_max:
+                    period_str = f"{period_max}개월 이하"
+                else:
+                    period_str = ""
+                
+                # 가입금액 포맷팅 개선
+                amount_min = row[7] if row[7] and row[7] not in ['제한없음', '없음', ''] else None
+                amount_max = row[8] if row[8] and row[8] not in ['제한없음', '없음', ''] else None
+                
+                if amount_min and amount_max and amount_min == amount_max:
+                    amount_str = f"{amount_min}원"
+                elif amount_min and amount_max:
+                    amount_str = f"{amount_min}~{amount_max}원"
+                elif amount_min:
+                    amount_str = f"{amount_min}원 이상"
+                elif amount_max:
+                    amount_str = f"{amount_max}원 이하"
+                else:
+                    amount_str = ""
+                
+                # 설명 길이 제한
+                description = row[9][:100] + "..." if row[9] and len(row[9]) > 100 else row[9]
+                
+                products.append({
                     "은행명": row[0],
                     "상품명": row[1],
                     "상품유형": row[2],
                     "기본금리": row[3],
                     "최대우대금리": row[4],
-                    "계약기간": f"{row[5]}~{row[6]}개월",
-                    "가입금액": f"{row[7]}~{row[8]}",
-                    "설명": row[9]
-                }
-                products.append(product)
-            
+                    "계약기간": period_str,
+                    "가입금액": amount_str,
+                    "설명": description
+                })
+
             return products
-    
+
     except Exception as e:
-        logger.error(f"기본 예금/적금 상품 조회 중 오류: {str(e)}")
-        # 하드코딩된 기본 상품 반환
+        logger.error(f"[recommend_deposit_products] 실패: {e}", exc_info=True)
+        # 임시 더미 데이터 반환 (전환용)
         return [
             {
-                "은행명": "일반은행",
-                "상품명": "정기예금",
+                "은행명": "테스트은행",
+                "상품명": "테스트 예금상품",
                 "상품유형": "정기예금",
                 "기본금리": 3.5,
                 "최대우대금리": 4.0,
-                "계약기간": "12~36개월",
-                "가입금액": "100만원~",
-                "설명": "안정적인 수익을 제공하는 기본 정기예금 상품입니다."
+                "계약기간": "12개월",  # 수정됨
+                "가입금액": "100만원 이상",  # 수정됨
+                "설명": "기본 예금 상품으로 지정된 기간 동안 예금을 유지하면 우대 금리혜택을 받을 수 있습니다."
             },
             {
-                "은행명": "일반은행",
-                "상품명": "자유적금",
-                "상품유형": "적립식",
-                "기본금리": 3.2,
-                "최대우대금리": 3.8,
-                "계약기간": "6~24개월",
-                "가입금액": "1만원~",
-                "설명": "매월 자유롭게 저축할 수 있는 적금 상품입니다."
+                "은행명": "개발은행",
+                "상품명": "디버깅 적금",
+                "상품유형": "정기적금",
+                "기본금리": 4.2,
+                "최대우대금리": 4.8,
+                "계약기간": "24개월",  # 수정됨
+                "가입금액": "10만원~50만원",  # 수정됨
+                "설명": "매월 일정액을 저축하면서 고수익을 기대할 수 있는 적금 상품입니다."
+            },
+            {
+                "은행명": "샘플은행",
+                "상품명": "파이썬 저축예금",
+                "상품유형": "자유입출금식",
+                "기본금리": 2.8,
+                "최대우대금리": 3.2,
+                "계약기간": "없음",  # 수정됨
+                "가입금액": "제한없음",  # 수정됨
+                "설명": "자유롭게 입출금이 가능한 저축예금 상품입니다. 필요할 때 언제든지 사용할 수 있습니다."
             }
         ]
 
@@ -297,84 +264,45 @@ async def recommend_fund_products(
     limit: int = 3
 ) -> List[Dict[str, Any]]:
     """
-    펀드 상품을 추천합니다.
-    
-    Args:
-        user_id: 사용자 ID
-        user_data: 사용자 재무 데이터
-        emotion_data: 감정 분석 결과
-        limit: 추천할 상품 개수
-        
-    Returns:
-        추천 상품 목록
+    펀드 상품 추천
     """
+
     try:
+        logger.debug(f"[recommend_fund_products] 시작 - user_id: {user_id}, limit: {limit}")
         async with SessionMaker() as session:
-            # 사용자 맞춤 추천 로직 구현
-            # 1. 연령 및 상황에 따른 위험 선호도 결정
+            logger.debug("DB 세션 생성 성공")
+            conditions = ["펀드성과정보_1년 IS NOT NULL", "펀드명 IS NOT NULL"]
+            params = {"limit": limit}
+            
+            # 기본 위험 선호도 설정
             age = user_data.get("나이", 35)
-            risk_preference = ""
-            
-            # 나이가 젊을수록 위험 선호도 높음
             if age < 30:
-                risk_preference = "주식형"
-            elif 30 <= age < 45:
-                risk_preference = "혼합형"
-            elif 45 <= age < 60:
-                risk_preference = "채권형"
+                risk_pref = "주식형"
+            elif age < 45:
+                risk_pref = "혼합형"
+            elif age < 60:
+                risk_pref = "채권형"
             else:
-                risk_preference = "안정형"
-            
-            # 2. 감정 상태에 따른 조정
-            if emotion_data:
-                dominant_emotion = emotion_data.get("dominant_emotion", "중립")
-                
-                # 불안/걱정 감정인 경우 안정적인 상품으로 조정
-                if dominant_emotion in ["공포", "걱정", "슬픔"] or emotion_data.get("is_anxious", False):
-                    if risk_preference == "주식형":
-                        risk_preference = "혼합형"
-                    elif risk_preference == "혼합형":
-                        risk_preference = "채권형"
-                
-                # 행복/중립 감정은 원래 선호도 유지
-            
-            # 3. 재무 상태에 따른 조정
+                risk_pref = "안정형"
+
+            # 감정, 재무상태로 조정
+            dominant_emotion = emotion_data.get("dominant_emotion", "중립") if emotion_data else "중립"
             liquidity_score = user_data.get("유동성점수", 50.0)
-            if liquidity_score < 40:
-                # 유동성이 낮은 경우 안정적인 상품으로 조정
-                if risk_preference == "주식형":
-                    risk_preference = "혼합형"
-                elif risk_preference == "혼합형":
-                    risk_preference = "채권형"
-            
-            # 4. 위험 선호도에 따른 펀드 유형 결정
-            fund_type_condition = ""
-            if risk_preference == "주식형":
-                fund_type_condition = "중유형 LIKE '%주식%'"
-            elif risk_preference == "혼합형":
-                fund_type_condition = "중유형 LIKE '%혼합%' OR 중유형 LIKE '%자산배분%'"
-            elif risk_preference == "채권형":
-                fund_type_condition = "중유형 LIKE '%채권%'"
+
+            if (dominant_emotion in ["공포", "걱정", "슬픔"] or liquidity_score < 40) and risk_pref == "주식형":
+                risk_pref = "혼합형"
+
+            if risk_pref == "주식형":
+                conditions.append("중유형 LIKE '%주식%'")
+            elif risk_pref == "혼합형":
+                conditions.append("(중유형 LIKE '%혼합%' OR 중유형 LIKE '%자산배분%')")
+            elif risk_pref == "채권형":
+                conditions.append("중유형 LIKE '%채권%'")
             else:
-                fund_type_condition = "중유형 LIKE '%MMF%' OR 중유형 LIKE '%채권%'"
-            
-            # 5. 성과 필터링
-            performance_condition = "펀드성과정보_1년 IS NOT NULL"
-            
-            # 6. 통합 쿼리 구성
-            conditions = []
-            if fund_type_condition:
-                conditions.append(f"({fund_type_condition})")
-            if performance_condition:
-                conditions.append(f"({performance_condition})")
-            
-            # 기본 조건 추가
-            conditions.append("펀드명 IS NOT NULL")
-            
-            # 조건 연결
-            where_clause = " AND ".join(conditions) if conditions else "1=1"
-            
-            # 쿼리 실행
+                conditions.append("(중유형 LIKE '%MMF%' OR 중유형 LIKE '%채권%')")
+
+            where_clause = " AND ".join(conditions)
+
             query = text(f"""
                 SELECT 
                     펀드명, 운용사명, 대유형, 중유형, 소유형,
@@ -384,167 +312,100 @@ async def recommend_fund_products(
                 WHERE {where_clause}
                 ORDER BY 펀드성과정보_1년 DESC
                 LIMIT :limit
-            """).bindparams(limit=limit)
-            
-            result = await session.execute(query)
-            rows = result.fetchall()
-            
-            # 결과 포맷팅
-            products = []
-            for row in rows:
-                product = {
-                    "펀드명": row[0],
-                    "운용사": row[1],
-                    "유형": f"{row[2]} > {row[3]} > {row[4]}",
-                    "1년수익률": row[5],
-                    "6개월수익률": row[6],
-                    "3개월수익률": row[7],
-                    "위험등급": row[8],
-                    "투자전략": row[9],
-                    "순자산": row[10]
-                }
-                products.append(product)
-            
-            return products if products else await _get_fallback_fund_products(limit)
-    
-    except Exception as e:
-        logger.error(f"펀드 상품 추천 중 오류 발생: {str(e)}")
-        return await _get_fallback_fund_products(limit)
+            """).bindparams(**params)
+            logger.debug(f"쿼리 생성: {query}")
 
-async def _get_fallback_fund_products(limit: int = 3) -> List[Dict[str, Any]]:
-    """
-    기본 펀드 상품 목록을 반환합니다. (오류 발생 시 폴백)
-    """
-    try:
-        async with SessionMaker() as session:
-            query = text("""
-                SELECT 
-                    펀드명, 운용사명, 대유형, 중유형, 소유형,
-                    펀드성과정보_1년, 펀드성과정보_6개월, 펀드성과정보_3개월,
-                    투자위험등급, 투자전략, 순자산
-                FROM 공모펀드상품
-                WHERE 펀드성과정보_1년 IS NOT NULL
-                ORDER BY 펀드성과정보_1년 DESC
-                LIMIT :limit
-            """).bindparams(limit=limit)
-            
-            result = await session.execute(query)
-            rows = result.fetchall()
-            
+            try:
+                logger.debug("쿼리 실행 시작")
+                result = await session.execute(query)
+                rows = result.fetchall()
+                logger.debug(f"쿼리 실행 성공, {len(rows)}개 결과 조회됨")
+            except Exception as exe:
+                logger.error(f"쿼리 실행 실패: {exe}")
+                raise
+
             products = []
             for row in rows:
-                product = {
+                # 수익률 포맷팅 (소수점 2자리로 제한)
+                rate_1y = f"{row[5]:.2f}%" if row[5] else "0.00%"
+                rate_6m = f"{row[6]:.2f}%" if row[6] else "0.00%"
+                rate_3m = f"{row[7]:.2f}%" if row[7] else "0.00%"
+                
+                # 순자산 포맷팅
+                asset_value = row[10]
+                if asset_value:
+                    if asset_value >= 1000000000000:  # 1조원 이상
+                        asset_str = f"{asset_value/1000000000000:.2f}조원"
+                    elif asset_value >= 100000000:  # 1억원 이상
+                        asset_str = f"{asset_value/100000000:.2f}억원"
+                    elif asset_value >= 10000:  # 1만원 이상
+                        asset_str = f"{asset_value/10000:.2f}만원"
+                    else:
+                        asset_str = f"{asset_value:,}원"
+                else:
+                    asset_str = ""
+                
+                # 설명 길이 제한
+                strategy = row[9][:100] + "..." if row[9] and len(row[9]) > 100 else row[9]
+                
+                # 유형 포맷팅 개선
+                type_str = ""
+                if row[2] and row[3] and row[4]:  # 대/중/소 유형 모두 있는 경우
+                    type_str = f"{row[2]} > {row[3]} > {row[4]}"
+                elif row[2] and row[3]:  # 대/중 유형만 있는 경우
+                    type_str = f"{row[2]} > {row[3]}"
+                elif row[2]:
+                    type_str = row[2]
+                
+                products.append({
                     "펀드명": row[0],
                     "운용사": row[1],
-                    "유형": f"{row[2]} > {row[3]} > {row[4]}",
-                    "1년수익률": row[5],
-                    "6개월수익률": row[6],
-                    "3개월수익률": row[7],
+                    "유형": type_str,
+                    "1년수익률": rate_1y,
+                    "6개월수익률": rate_6m,
+                    "3개월수익률": rate_3m,
                     "위험등급": row[8],
-                    "투자전략": row[9],
-                    "순자산": row[10]
-                }
-                products.append(product)
-            
+                    "투자전략": strategy,
+                    "순자산": asset_str
+                })
+
             return products
-    
+
     except Exception as e:
-        logger.error(f"기본 펀드 상품 조회 중 오류: {str(e)}")
-        # 하드코딩된 기본 상품 반환
+        logger.error(f"[recommend_fund_products] 실패: {e}", exc_info=True)
+        # 임시 더미 데이터 반환 (전환용)
         return [
             {
-                "펀드명": "가치주식형펀드",
-                "운용사": "표준자산운용",
-                "유형": "국내 > 주식형 > 가치주",
-                "1년수익률": 12.5,
-                "6개월수익률": 6.8,
-                "3개월수익률": 3.2,
-                "위험등급": 2,
-                "투자전략": "국내 우량 가치주에 투자하여 안정적인 수익을 추구합니다.",
-                "순자산": 10000000000
+                "펀드명": "테스트 주식형 펀드",
+                "운용사": "테스트자산운용",
+                "유형": "주식형 > 국내주식",
+                "1년수익률": "8.50%",  # 수정됨
+                "6개월수익률": "4.20%",  # 수정됨
+                "3개월수익률": "2.10%",  # 수정됨
+                "위험등급": "3등급(다소높은위험)",
+                "투자전략": "국내 대형 우량주 중심 투자를 통한 자본이득 추구. 성장성 주식에 집중 투자하여 장기적 수익을 추구합니다.",
+                "순자산": "500.00억원"  # 수정됨
             },
             {
-                "펀드명": "글로벌채권형펀드",
-                "운용사": "표준자산운용",
-                "유형": "해외 > 채권형 > 글로벌",
-                "1년수익률": 5.5,
-                "6개월수익률": 2.8,
-                "3개월수익률": 1.2,
-                "위험등급": 4,
-                "투자전략": "글로벌 국채 및 우량 회사채에 투자하여 안정적인 이자수익을 추구합니다.",
-                "순자산": 5000000000
+                "펀드명": "안정성장 혼합형 펀드",
+                "운용사": "샘플자산운용",
+                "유형": "혼합형 > 채권혼합",
+                "1년수익률": "5.80%",  # 수정됨
+                "6개월수익률": "3.10%",  # 수정됨
+                "3개월수익률": "1.50%",  # 수정됨
+                "위험등급": "4등급(보통위험)",
+                "투자전략": "채권 70%, 주식 30% 안정적 분산투자를 통한 균형 있는 자산 운용. 안정적인 채권 수익과 주식 투자를 통한 성장을 동시에 추구합니다.",
+                "순자산": "350.00억원"  # 수정됨
+            },
+            {
+                "펀드명": "채권형 안정 펀드",
+                "운용사": "안전자산운용",
+                "유형": "채권형 > 국내채권",
+                "1년수익률": "3.20%",  # 수정됨
+                "6개월수익률": "1.80%",  # 수정됨
+                "3개월수익률": "0.90%",  # 수정됨
+                "위험등급": "5등급(낮은위험)",
+                "투자전략": "국내 우량 회사채 및 국채 중심 투자를 통한 안정적인 이자 수익 추구. 금리 변동에 따른 위험을 최소화하고 안정적인 수익을 제공합니다.",
+                "순자산": "250.00억원"  # 수정됨
             }
         ]
-
-def format_product_recommendation(
-    products: List[Dict[str, Any]], 
-    product_type: str, 
-    emotion_data: Dict[str, Any] = None
-) -> str:
-    """
-    추천 상품 목록을 사용자 친화적인 텍스트로 포맷팅합니다.
-    
-    Args:
-        products: 추천 상품 목록
-        product_type: 상품 유형 (deposit 또는 fund)
-        emotion_data: 감정 분석 결과
-        
-    Returns:
-        포맷팅된 추천 메시지
-    """
-    if not products:
-        return "현재 추천할 수 있는 상품이 없습니다."
-    
-    # 감정에 따른 메시지 톤 조정
-    intro_message = "고객님께 맞는 상품을 추천해 드립니다."
-    if emotion_data:
-        dominant_emotion = emotion_data.get("dominant_emotion", "중립")
-        
-        if dominant_emotion in ["화남", "슬픔"]:
-            intro_message = "현재 상황이 어려우실 수 있지만, 다음 상품들이 도움이 될 수 있을 것 같습니다."
-        elif dominant_emotion == "공포" or emotion_data.get("is_anxious", False):
-            intro_message = "걱정이 많으신 것 같습니다. 안정적인 상품 위주로 추천해 드립니다."
-        elif dominant_emotion == "행복":
-            intro_message = "좋은 기분을 더 오래 유지할 수 있는 상품을 추천해 드립니다."
-    
-    # 상품 타입에 따른 메시지 생성
-    if product_type == PRODUCT_TYPE_DEPOSIT:
-        message = f"{intro_message}\n\n📌 **예금/적금 상품 추천**\n\n"
-        
-        for i, product in enumerate(products, 1):
-            message += f"{i}. **{product.get('상품명', '정보 없음')}** ({product.get('은행명', '정보 없음')})\n"
-            message += f"   - 상품유형: {product.get('상품유형', '정보 없음')}\n"
-            message += f"   - 기본금리: {product.get('기본금리', 0)}%"
-            
-            if product.get('최대우대금리') and product.get('최대우대금리') > product.get('기본금리', 0):
-                message += f" (최대 {product.get('최대우대금리')}%)\n"
-            else:
-                message += "\n"
-                
-            message += f"   - 계약기간: {product.get('계약기간', '정보 없음')}\n"
-            message += f"   - 가입금액: {product.get('가입금액', '정보 없음')}\n"
-            
-            if product.get('설명'):
-                message += f"   - 설명: {product.get('설명')[:100]}...\n"
-                
-            message += "\n"
-    
-    elif product_type == PRODUCT_TYPE_FUND:
-        message = f"{intro_message}\n\n📌 **펀드 상품 추천**\n\n"
-        
-        for i, product in enumerate(products, 1):
-            message += f"{i}. **{product.get('펀드명', '정보 없음')}** ({product.get('운용사', '정보 없음')})\n"
-            message += f"   - 유형: {product.get('유형', '정보 없음')}\n"
-            message += f"   - 수익률: 1년 {product.get('1년수익률', 0)}%, 6개월 {product.get('6개월수익률', 0)}%, 3개월 {product.get('3개월수익률', 0)}%\n"
-            message += f"   - 위험등급: {product.get('위험등급', '정보 없음')}\n"
-            
-            if product.get('투자전략'):
-                message += f"   - 투자전략: {product.get('투자전략')[:100]}...\n"
-                
-            message += "\n"
-    
-    else:
-        message = "지원하지 않는 상품 유형입니다."
-    
-    message += "해당 상품에 관심이 있으시면 더 자세한 정보를 알려드리겠습니다."
-    return message

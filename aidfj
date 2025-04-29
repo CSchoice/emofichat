@@ -1,0 +1,65 @@
+[33mcommit f8e151431e92c8b9a2ea1d2310862a06aa9f3f74[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mfastapi[m[33m)[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Mon Apr 28 18:27:53 2025 +0900
+
+    feat: 금융상품 추천 코드 추가
+
+[33mcommit eca15e295bc9dc9fb15d87f1dda472dfa64c7bfc[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Mon Apr 28 14:26:21 2025 +0900
+
+    fix : 라벨링 오류 및 레디스 연결 수정
+
+[33mcommit b976076a54cdfc45edb8c734a53913851c101eeb[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Fri Apr 25 00:29:51 2025 +0900
+
+    refactor: finance_chat.py 기능별 파일 분리
+
+[33mcommit 890cee2991453ea016c48a53465ddb35e2820e10[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Fri Apr 25 00:13:51 2025 +0900
+
+    feat: 사용자 대화 맥락을 답변에 사용
+
+[33mcommit 420365c1b4ac06ad021fd6acf24ae13a4a5b80b4[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Fri Apr 25 00:03:45 2025 +0900
+
+    feat: 템플릿 제거 및 GPT기반 답변 생성
+
+[33mcommit 469302e1473781d388a0d9b8b67ef1f81a5d8d8f[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Fri Apr 25 00:01:23 2025 +0900
+
+    필요한 파일 복구 및 중요 테이블 없어도 서비스 제공
+
+[33mcommit 839eff2042ef6681711711e6719747da8b18a1a6[m[33m ([m[1;32mmaster[m[33m)[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Thu Apr 24 23:51:47 2025 +0900
+
+    remove : 주석 및 불필요한 코드 제거
+
+[33mcommit ae63f33edb7f9babd7d6dd90fa8bb1c0272c2f49[m[33m ([m[1;31morigin/master[m[33m)[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Thu Apr 24 23:37:01 2025 +0900
+
+    feat : 기존 엑셀 csv 기반에서 DB 기반으로 변경
+
+[33mcommit 012d14650da5d5d40bf4aa5c3711e54841e1d6b4[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Thu Apr 24 23:11:47 2025 +0900
+
+    fix : 데이터베이스 연결 수정 및 채팅 로직 변경
+
+[33mcommit bbd759ffc094e44db8c15ae8a18e32b2d64c4087[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Thu Apr 24 21:20:39 2025 +0900
+
+    feat : db 추가 및 시나리오 추가
+
+[33mcommit 19609e816a20f3722020eafb8f615ca961768f2b[m
+Author: CSchoice <tkdlqjf@gmail.com>
+Date:   Thu Apr 24 21:08:54 2025 +0900
+
+    feat : fastapi 기본 설정 및 룰 엔진 구현 및 chatgpt 연동
