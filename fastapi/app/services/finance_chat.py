@@ -14,9 +14,10 @@ from app.services.generic_chat import load_history, save_history, get_generic_re
 from app.services.finance_analyzer import analyze_financial_trends
 from app.services.data_fetcher import get_user_metrics
 from app.services.product_recommender import (
-    recommend_products,
+    recommend_deposit_products, recommend_fund_products,
     PRODUCT_TYPE_DEPOSIT, PRODUCT_TYPE_FUND
 )
+  
 from app.services.product_formatter import format_product_recommendation
 
 # ───────────────────── 상수 정의 ────────────────────── #
@@ -143,7 +144,12 @@ async def get_finance_reply(user_id: str, user_msg: str) -> Tuple[str, Optional[
             ptype = PRODUCT_TYPE_DEPOSIT
 
         row = await get_user_data(user_id) or {}
-        products = await recommend_products(user_id, row, emotion_data, ptype, limit=3)
+        if ptype == PRODUCT_TYPE_DEPOSIT:
+            products = await recommend_deposit_products(user_id, row, emotion_data, limit=3)
+        elif ptype == PRODUCT_TYPE_FUND:
+            products = await recommend_fund_products(user_id, row, emotion_data, limit=3)
+        else:
+            products = []
         formatted_response = format_product_recommendation(products, ptype, emotion_data)
         return formatted_response, None
 
