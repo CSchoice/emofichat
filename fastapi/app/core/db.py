@@ -1,6 +1,10 @@
 import os
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
 from app.core.config import get_settings
+
+# SQLAlchemy Base 클래스 생성
+Base = declarative_base()
 
 
 # 로컬 개발 환경용 DB URL

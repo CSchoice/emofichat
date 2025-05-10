@@ -5,10 +5,18 @@ from app.services.emotion_tracker import record_emotion
 from app.services.generic_chat import get_generic_reply
 from app.services.finance_chat import get_finance_reply
 from app.services.product_recommender import PRODUCT_TYPE_DEPOSIT, PRODUCT_TYPE_FUND
+
+# 금융 데이터베이스 서비스 추가
+from app.services.database.user_financial_service import get_user_financial_service
+from app.services.database.bank_product_service import get_bank_product_service
+from app.services.database.fund_service import get_fund_service
+from app.services.database.saving_product_service import get_saving_product_service
+
 import logging
 from typing import Optional, Dict, List, Any, Tuple
 import time
 import re
+import json
 
 # 로거 설정
 logger = logging.getLogger(__name__)
@@ -207,6 +215,21 @@ async def chat(req: ChatRequest, request: Request, background_tasks: BackgroundT
         
         # 금융 관련 질문인 경우
         if is_finance:
+            # 사용자의 금융 정보 조회 시도
+            financial_data = None
+            try:
+                user_financial_service = get_user_financial_service()
+                financial_summary = await user_financial_service.get_user_financial_summary(req.user_id)
+                
+                if "error" not in financial_summary:
+                    financial_data = financial_summary
+                    logger.info(f"사용자 {req.user_id}의 금융 정보를 성공적으로 조회했습니다.")
+                else:
+                    logger.warning(f"사용자 {req.user_id}의 금융 정보 조회 실패: {financial_summary.get('error')}")
+            except Exception as e:
+                logger.error(f"금융 데이터베이스 조회 오류: {str(e)}")
+            
+            # 금융 챗봇 응답 생성
             reply, scen = await get_finance_reply(req.user_id, req.message)
             
             # 상품 추천 정보 추출
@@ -224,6 +247,24 @@ async def chat(req: ChatRequest, request: Request, background_tasks: BackgroundT
             # 상품 추천 키워드 확인 (정규식 일치 여부와 관계없이 체크)
             has_product_keywords = any(keyword in reply for keyword in ["**예금/적금 상품 추천**", "**펀드 상품 추천**", "기본금리", "위험등급", "은행명", "펀드명"])
             
+            # 금융 데이터가 있고 특별한 키워드가 있는 경우 금융 데이터 조회
+            financial_info = None
+            if any(keyword in req.message.lower() for keyword in ["잔액", "계좌", "카드", "대출", "연체", "재무상태", "금융상태", "금융정보"]):
+                try:
+                    if financial_data:
+                        # 금융 건강 정보 추가
+                        financial_health = financial_data.get("financial_health", {})
+                        financial_info = {
+                            "balance": financial_data.get("balance", {}).get("balance", 0),
+                            "loan_balance": financial_data.get("balance", {}).get("balance_loan", 0),
+                            "is_delinquent": financial_data.get("delinquency", {}).get("is_delinquent") == "Y",
+                            "health_score": financial_health.get("score", 50),
+                            "health_grade": financial_health.get("grade", "보통")
+                        }
+                        logger.info(f"사용자 {req.user_id}의 금융 정보를 응답에 포함합니다.")
+                except Exception as e:
+                    logger.error(f"금융 정보 처리 오류: {str(e)}")
+            
             # 상품 추천 정보가 있는 경우 응답에 포함
             if product_recommendation or has_product_keywords:
                 # 정규식으로 추출된 상품이 있으면 그것을 사용하고, 없다면 reply 전체를 달아주기
@@ -231,13 +272,15 @@ async def chat(req: ChatRequest, request: Request, background_tasks: BackgroundT
                     reply=reply,  # 클린 리플라이가 아니라 전체 리플라이를 활용
                     scenario=scenario_result,
                     emotion=emotion_result,
-                    product_recommendation=product_recommendation
+                    product_recommendation=product_recommendation,
+                    financial_info=financial_info
                 )
             else:
                 response = ChatResponse(
                     reply=reply,
                     scenario=scenario_result,
-                    emotion=emotion_result
+                    emotion=emotion_result,
+                    financial_info=financial_info
                 )
         else:
             # 일반 대화인 경우

@@ -1,6 +1,6 @@
 # app/models/__init__.py
 from pydantic import BaseModel
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from datetime import datetime
 
 class ChatRequest(BaseModel):
@@ -28,6 +28,7 @@ class ChatResponse(BaseModel):
     scenario: Optional[ScenarioResult] = None
     emotion: Optional[EmotionResult] = None
     product_recommendation: Optional[ProductRecommendation] = None
+    financial_info: Optional[Dict[str, Any]] = None  # 사용자의 금융 정보
 
 # 감정 트렌드 분석 결과 모델
 class EmotionTrendsResponse(BaseModel):
