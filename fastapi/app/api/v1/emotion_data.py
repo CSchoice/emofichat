@@ -97,26 +97,71 @@ async def get_financial_health(
         trend_data = await db_service.get_emotion_trend(user_id, days=30)
         
         # 재무 건강 상태 계산
-        financial_stress_index = 0.5  # 기본값
+        financial_stress_index = 0.5  # 초기 기본값
         stress_trend = "stable"
         
-        # 감정 데이터가 있는 경우 재무 스트레스 지수 계산
-        if trend_data.get("data_points", 0) > 0:
-            # 부정적 감정 비율과 불안 감정 비율을 기반으로 스트레스 지수 계산
-            negative_ratio = trend_data.get("negative_ratio", 0.0)
-            anxious_ratio = trend_data.get("anxious_ratio", 0.0)
-            emotion_volatility = trend_data.get("emotion_volatility", 0.0)
+        # 금융 데이터 조회 시도
+        try:
+            from app.services.database.user_financial_service import get_user_financial_service
+            user_financial_service = get_user_financial_service()
+            financial_summary = await user_financial_service.get_user_financial_summary(user_id)
             
-            # 재무 스트레스 지수 계산 (0~1 사이)
-            financial_stress_index = (negative_ratio * 0.4) + (anxious_ratio * 0.4) + (emotion_volatility * 0.2)
-            
-            # 스트레스 트렌드 결정
-            if financial_stress_index > 0.7:
-                stress_trend = "high"
-            elif financial_stress_index > 0.4:
-                stress_trend = "moderate"
-            else:
-                stress_trend = "low"
+            if "error" not in financial_summary:
+                # 금융 건강 점수 가져오기
+                financial_health = financial_summary.get("financial_health", {})
+                health_score = financial_health.get("score", 50)
+                
+                # 부채 비율 가져오기
+                scenario = financial_summary.get("scenario", {})
+                debt_ratio = scenario.get("debt_ratio", 0.0)
+                dti_estimate = scenario.get("dti_estimate", 0.0)
+                
+                # 연체 여부 가져오기
+                delinquency = financial_summary.get("delinquency", {})
+                is_delinquent = delinquency.get("is_delinquent") == "Y"
+                
+                # 금융 데이터 기반으로 스트레스 지수 계산
+                # 건강 점수를 0~1 범위로 정규화 (100점 만점)
+                health_factor = 1 - (health_score / 100.0)  # 점수가 낮을수록 스트레스 높음
+                
+                # 부채 비율 및 DTI 정규화 (0~1 범위)
+                debt_factor = min(debt_ratio / 100.0, 1.0)  # 부채 비율이 높을수록 스트레스 높음
+                dti_factor = min(dti_estimate / 1000000000.0, 1.0)  # DTI가 높을수록 스트레스 높음
+                
+                # 연체 여부 반영
+                delinquent_factor = 1.0 if is_delinquent else 0.0
+                
+                # 가중치 적용하여 종합 스트레스 지수 계산
+                financial_stress_index = (
+                    health_factor * 0.4 +
+                    debt_factor * 0.3 +
+                    dti_factor * 0.2 +
+                    delinquent_factor * 0.1
+                )
+                
+                # 감정 데이터가 있는 경우 합산
+                if trend_data.get("data_points", 0) > 0:
+                    # 부정적 감정 비율과 불안 감정 비율을 기반으로 스트레스 지수 계산
+                    negative_ratio = trend_data.get("negative_ratio", 0.0)
+                    anxious_ratio = trend_data.get("anxious_ratio", 0.0)
+                    emotion_volatility = trend_data.get("emotion_volatility", 0.0)
+                    
+                    # 감정 기반 스트레스 지수
+                    emotion_stress_index = (negative_ratio * 0.4) + (anxious_ratio * 0.4) + (emotion_volatility * 0.2)
+                    
+                    # 금융 데이터와 감정 데이터를 합산하여 최종 스트레스 지수 계산
+                    financial_stress_index = (financial_stress_index * 0.7) + (emotion_stress_index * 0.3)
+        except Exception as e:
+            logger.error(f"금융 데이터 기반 스트레스 지수 계산 오류: {str(e)}")
+            # 오류 발생 시 기본값 유지
+        
+        # 스트레스 트렌드 결정
+        if financial_stress_index > 0.7:
+            stress_trend = "high"
+        elif financial_stress_index > 0.4:
+            stress_trend = "moderate"
+        else:
+            stress_trend = "low"
         
         # 맞춤형 추천 생성
         recommendations = []
