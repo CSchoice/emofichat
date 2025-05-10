@@ -2,7 +2,7 @@
 from fastapi import FastAPI, Request, status, Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1 import chat, monitor
+from app.api.v1 import chat, monitor, chat_improved
 from dotenv import load_dotenv, find_dotenv
 import logging
 import time
@@ -83,6 +83,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # 라우터 등록
 app.include_router(chat.router, prefix="/api")
+app.include_router(chat_improved.router, prefix="/api", tags=["chat"])
 app.include_router(monitor.router, prefix="/api/monitor", tags=["monitoring"])
 
 # 기본 루트 엔드포인트
