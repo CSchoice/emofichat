@@ -1,5 +1,17 @@
 import math
+import sys
+import os
 from typing import Dict, Tuple, Any
+from pathlib import Path
+
+# rules 모듈 경로 문제 해결
+# 현재 파일의 경로를 기준으로 fastapi로 올라가서 rules 모듈 찾기
+fastapi_root = Path(__file__).parent.parent.parent  # app/services/ 에서 3단계 위로 올라감
+
+# 시스템 경로에 rules 모듈이 있는 디렉토리 추가
+if fastapi_root not in sys.path:
+    sys.path.append(str(fastapi_root))
+
 from rules.scenario_rules import scenario_rules
 from rules.thresholds import thresholds
 from app.util.eval_expr import eval_expr
@@ -7,7 +19,7 @@ from app.util.eval_expr import eval_expr
 def _sigmoid(x: float) -> float:
     return 1 / (1 + math.exp(-x))
 
-def score_scenarios(row: Dict[str, Any], user_msg: str = "") -> Tuple[str, float, Dict[str, float]]:
+def score_scenarios(row: Dict[str, Any], user_msg: str = "") -> Tuple[str, float, Dict[str, str]]:
     """
     row(dict): 고객 1명의 금융 지표 및 분석값
     user_msg(str): 사용자의 발화 텍스트 (선택)
@@ -30,7 +42,14 @@ def score_scenarios(row: Dict[str, Any], user_msg: str = "") -> Tuple[str, float
         for s in rule["signals"]:
             if eval_expr(s["expr"], row, thresholds):
                 signal_score += s["weight"]
-                signal_factors[s["expr"]] = row.get(s["expr"].split()[0], None)
+                # 표현식을 키로 사용하고, 값을 반드시 문자열로 변환
+                key = s["expr"]
+                value = row.get(s["expr"].split()[0], "")
+                # None 값이 있는 경우 공백 문자열로 치환
+                if value is None:
+                    value = ""
+                # 숫자나 그 외 값의 경우 문자열로 변환
+                signal_factors[key] = str(value)
 
         # 3. modifier 적용
         for m in rule.get("modifiers", []):

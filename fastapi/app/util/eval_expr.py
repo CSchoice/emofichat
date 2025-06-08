@@ -1,4 +1,5 @@
 import math, re
+from decimal import Decimal
 
 _TH = re.compile(r"\{([A-Z_]+)\}")
 _OP = {"&": " and ", "|": " or "}
@@ -84,7 +85,45 @@ _FIELD_MAPPING = {
 
 def eval_expr(expr: str, row: dict, th: dict) -> bool:
     try:
-        # 1. 임계값 치환
+        # 0. row의 Decimal 값을 float로 변환
+        temp_row = {}
+        for k, v in row.items():
+            if isinstance(v, Decimal):
+                temp_row[k] = float(v)
+            else:
+                temp_row[k] = v
+        
+        # 1. 임계값 치환 - 기본값 추가
+        # 기본 임계값 설정 - 누락된 임계값이 있는 경우
+        default_thresholds = {
+            "CREDIT_USAGE_P90": 90,
+            "LIQ_P20": 30,
+            "LIQ_P80": 70,
+            "DEBT_P80": 80,
+            "DEBT_P50": 50,
+            "NEC_P80": 0.8,
+            "NEC_P20": 0.2,
+            "STRESS_HIGH": 70,
+            "HOUSING_P70": 0.3,
+            "MEDICAL_P80": 0.2,
+            "REVOLVING_P70": 0.7
+        }
+        
+        # th에 없는 키를 default_thresholds에서 추가
+        for key, value in default_thresholds.items():
+            if key not in th:
+                th[key] = value
+                
+        # 임계값을 문자열로 인식하는 경우도 처리 (credit_usage_ratio >= CREDIT_USAGE_P90 형태)
+        if "CREDIT_USAGE_P90" in expr and "{CREDIT_USAGE_P90}" not in expr:
+            expr = expr.replace("CREDIT_USAGE_P90", str(th.get("CREDIT_USAGE_P90", 90)))
+        if "LIQ_P20" in expr and "{LIQ_P20}" not in expr:
+            expr = expr.replace("LIQ_P20", str(th.get("LIQ_P20", 30)))
+        if "LIQ_P80" in expr and "{LIQ_P80}" not in expr:
+            expr = expr.replace("LIQ_P80", str(th.get("LIQ_P80", 70)))
+        if "DEBT_P80" in expr and "{DEBT_P80}" not in expr:
+            expr = expr.replace("DEBT_P80", str(th.get("DEBT_P80", 80)))
+        
         expr = _TH.sub(lambda m: str(th.get(m.group(1), "math.nan")), expr)
         
         # 2. 연산자 변환
@@ -100,18 +139,33 @@ def eval_expr(expr: str, row: dict, th: dict) -> bool:
         # eval 실행 전 필드들을 확인하고 없는 필드는 0이나 적절한 기본값으로 설정
         keys_in_expr = [key for key in _FIELD_MAPPING.values() if key in expr]
         for key in keys_in_expr:
-            if key not in row and key in expr:
+            if key not in temp_row and key in expr:
                 if "card_application_count" == key:
-                    row[key] = 0  # 카드신청건수가 없는 경우 0으로 가정
+                    temp_row[key] = 0  # 카드신청건수가 없는 경우 0으로 가정
                 elif any(key.startswith(prefix) for prefix in ["is_", "has_"]):
-                    row[key] = False  # 불리언 필드는 False로 기본값 설정
+                    temp_row[key] = False  # 불리언 필드는 False로 기본값 설정
                 else:
-                    row[key] = 0.0  # 숫자 필드는 0으로 기본값 설정
+                    temp_row[key] = 0.0  # 숫자 필드는 0으로 기본값 설정
         
         # 4. 표현식 평가
         try:
+            # 괄호로 감싸진 임계값이 있는 경우 처리
+            # "credit_usage_ratio >= {CREDIT_USAGE_P90}" -> "credit_usage_ratio >= 90"
+            bracket_thresholds = re.findall(r'\{([A-Z_0-9]+)\}', expr)
+            for th_name in bracket_thresholds:
+                if th_name in th:
+                    expr = expr.replace(f"{{{th_name}}}", str(th[th_name]))
+                else:
+                    # 임계값이 없을 경우 default_thresholds에서 찾아보기
+                    if th_name in default_thresholds:
+                        expr = expr.replace(f"{{{th_name}}}", str(default_thresholds[th_name]))
+                    else:
+                        # 임계값을 찾을 수 없는 경우
+                        print(f"임계값을 찾을 수 없음: {th_name}")
+                        return False
+
             sandbox = {"__builtins__": {}, "math": math}
-            result = bool(eval(expr, sandbox, row))
+            result = bool(eval(expr, sandbox, temp_row))
             return result
         except Exception as e:
             print(f"표현식 평가 오류: {expr}")

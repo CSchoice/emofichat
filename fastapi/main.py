@@ -2,11 +2,13 @@
 from fastapi import FastAPI, Request, status, Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1 import chat            # ← 폴더 구조에 맞춰 변경!
+from app.api.v1 import chat, monitor, chat_improved, emotion_data, recommendation, users, financial_data
 from dotenv import load_dotenv, find_dotenv
 import logging
 import time
 import os
+import sys
+from pathlib import Path
 from app.core.logger import setup_logger
 
 # 환경변수 로드
@@ -15,6 +17,18 @@ load_dotenv(find_dotenv())
 # 로깅 설정
 setup_logger()
 logger = logging.getLogger(__name__)
+
+# 시스템 경로에 프로젝트 루트 추가
+project_root = Path(__file__).parent
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+
+# 임계값 모듈 미리 로드
+try:
+    from rules.thresholds import thresholds
+    logger.info(f"임계값 모듈 로드 완료: {len(thresholds)} 항목")
+except Exception as e:
+    logger.error(f"임계값 모듈 로드 실패: {str(e)}")
 
 # FastAPI 앱 인스턴스
 app = FastAPI(
@@ -28,7 +42,7 @@ app = FastAPI(
 # CORS 미들웨어 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 실제 운영 환경에서는 특정 도메인만 허용하는 것이 좋습니다
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,6 +83,12 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # 라우터 등록
 app.include_router(chat.router, prefix="/api")
+app.include_router(chat_improved.router, prefix="/api", tags=["chat"])
+app.include_router(monitor.router, prefix="/api/monitor", tags=["monitoring"])
+app.include_router(emotion_data.router, prefix="/api", tags=["emotion_data"])
+app.include_router(recommendation.router, prefix="/api", tags=["recommendation"])
+app.include_router(users.router, prefix="/api", tags=["users"])
+app.include_router(financial_data.router, prefix="/api", tags=["financial_data"])
 
 # 기본 루트 엔드포인트
 @app.get("/")
@@ -97,6 +117,41 @@ logger.info("감정 기반 금융 챗봇 API 서버 시작")
 async def startup_event():
     logger.info("서버 초기화 완료")
     
+    # thresholds 모듈의 기본값 설정 확인
+    try:
+        from rules.thresholds import thresholds
+        # 필수 임계값 설정 확인
+        required_thresholds = [
+            "CREDIT_USAGE_P90", "LIQ_P20", "LIQ_P80", "DEBT_P80", 
+            "DEBT_P50", "NEC_P80", "NEC_P20", "STRESS_HIGH", 
+            "HOUSING_P70", "MEDICAL_P80", "REVOLVING_P70"
+        ]
+        
+        # 누락된 임계값 설정
+        defaults = {
+            "CREDIT_USAGE_P90": 90,
+            "LIQ_P20": 30,
+            "LIQ_P80": 70,
+            "DEBT_P80": 80,
+            "DEBT_P50": 50,
+            "NEC_P80": 0.8,
+            "NEC_P20": 0.2,
+            "STRESS_HIGH": 70,
+            "HOUSING_P70": 0.3,
+            "MEDICAL_P80": 0.2,
+            "REVOLVING_P70": 0.7
+        }
+        
+        # 누락된 항목 설정
+        for key in required_thresholds:
+            if key not in thresholds:
+                thresholds[key] = defaults.get(key)
+                logger.info(f"임계값 {key} 기본값 설정: {defaults.get(key)}")
+                
+        logger.info(f"임계값 설정 완료: {len(thresholds)} 항목")
+    except Exception as e:
+        logger.error(f"임계값 설정 중 오류: {str(e)}")
+    
     # 메모리 캐시 구조 확인 - 문자열로 저장된 데이터를 객체로 변환
     try:
         from app.core.redis_client import memory_cache
@@ -122,4 +177,3 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info("서버 종료")
-

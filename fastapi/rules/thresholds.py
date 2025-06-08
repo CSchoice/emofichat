@@ -1,29 +1,18 @@
-"""
-thresholds.py
-  · 기본값을 먼저 정의해 두고
-  · load_from_stats(stats: dict) 가 들어오면 실시간으로 덮어쓴다.
-"""
-
 # ── 기본값 ──────────────────────────────────────────────────
-LIQ_P20, LIQ_P80         = 30, 70
-DEBT_P80, DEBT_P50       = 80, 50
-NEC_P80, NEC_P20         = 0.8, 0.2
-STRESS_HIGH              = 70
-HOUSING_P70              = 0.3
-MEDICAL_P80              = 0.2
-CREDIT_USAGE_P90         = 90
-REVOLVING_P70            = 0.7
+LIQ_P20, LIQ_P80         = 0.0000, 0.7953
+DEBT_P80, DEBT_P50       = 1.2985, 0.7327
+NEC_P80, NEC_P20         = 22.9239, 0.0000   # Essential_Ratio 기반
+STRESS_HIGH              = 633367335.4003    # μ+σ (9723605.7637 + 623643729.6366)
+HOUSING_P70              = 464460000.0000    # 활성 그룹 기준
+MEDICAL_P80              = 0.3558
+CREDIT_USAGE_P90         = 1.0404
+REVOLVING_P70            = 0.3722            # 활성 그룹 기준
 
 # dict 형태로도 노출 (eval_expr 에서 사용)
 thresholds: dict[str, float] = globals()
 
-
 # ── 동적 로더 ───────────────────────────────────────────────
 def load_from_stats(stats: dict) -> None:
-    """
-    stats: 집계 결과 {지표명_quantile or _mu/_sigma: List/float}
-    → thresholds 딕셔너리를 in-place 로 갱신
-    """
     if "liquidity_score_q" in stats:
         thresholds["LIQ_P20"] = stats["liquidity_score_q"][1]
         thresholds["LIQ_P80"] = stats["liquidity_score_q"][5]

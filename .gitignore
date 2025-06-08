@@ -1,0 +1,56 @@
+# Python (FastAPI)
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.log
+*.sqlite3
+
+# 환경파일, 민감한 설정
+.env
+*.env
+
+# 데이터 파일
+*.csv
+*.zip
+
+# VSCode 등 IDE 설정
+.vscode/
+.idea/
+
+# MacOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Java build
+target/
+build/
+out/
+
+# Gradle
+.gradle/
+build/
+
+# Maven
+.mvn/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+
+# 기타
+node_modules/
+
+venv/
+fastapi/venv/
+
+.requirements.txt
+*.egg-info/
+*.egg
+
+*test*.py
+
+UPDATES*.md
